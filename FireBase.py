@@ -168,7 +168,11 @@ def predict_future(model, scaler, scaled, df):
 
 # ============================ 📈 畫圖 ============================
 def plot_all(df_real, df_future):
-    df_all = pd.concat([df_real[['date', 'Close']], df_future])
+    df_all = pd.concat([df_real[['date','Close']], df_future])
+
+    # 🔥 這一行很重要：統一日期格式
+    df_all['date'] = pd.to_datetime(df_all['date'])
+
     df_all['SMA_5'] = df_all['Close'].rolling(5).mean()
     df_all['SMA_10'] = df_all['Close'].rolling(10).mean()
 
@@ -179,7 +183,7 @@ def plot_all(df_real, df_future):
     today = datetime.now().strftime("%Y-%m-%d")
     file_path = f"{results_dir}/{today}.png"
 
-    plt.figure(figsize=(12, 6))
+    plt.figure(figsize=(12,6))
     plt.plot(df_all['date'], df_all['Close'], label="Real/Pred Close")
     plt.plot(df_all['date'], df_all['SMA_5'], label="SMA 5")
     plt.plot(df_all['date'], df_all['SMA_10'], label="SMA 10")
