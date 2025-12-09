@@ -155,11 +155,18 @@ def predict_future_ma(model, scaler_x, scaler_y, X_scaled, df):
 
 
 # ============================ 📈 畫圖 ============================
+# ============================ 📈 畫圖 ============================
 def plot_all(df_real, df_future):
+    # 將 index 當作日期
     df_real['date'] = pd.to_datetime(df_real.index)
+    df_future['date'] = pd.to_datetime(df_future['date'])
+
+    # 合併歷史與預測日期範圍
+    df_all = pd.concat([df_real[['date','Close','SMA_5','SMA_10']], df_future.set_index('date')], axis=0)
+
     plt.figure(figsize=(12,6))
 
-    # 畫收盤價
+    # 畫歷史收盤價
     plt.plot(df_real['date'], df_real['Close'], label="Close", color="blue")
 
     # 畫歷史 SMA5 / SMA10
@@ -170,8 +177,12 @@ def plot_all(df_real, df_future):
     plt.plot(df_future['date'], df_future['Pred_MA5'], '--', label="Pred MA5", color="lime")
     plt.plot(df_future['date'], df_future['Pred_MA10'], '--', label="Pred MA10", color="red")
 
+    # 設定 X 軸以日為單位
+    plt.gca().xaxis.set_major_locator(plt.MultipleLocator(1))
+    plt.gcf().autofmt_xdate(rotation=45)  # 斜顯示日期
+
     plt.legend()
-    plt.title("2301.TW 預測 5/10 日線")
+    plt.title("2301.TW 預測 5/10 日線（每日刻度）")
     plt.xlabel("Date")
     plt.ylabel("Price")
 
