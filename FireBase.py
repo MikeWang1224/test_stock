@@ -316,8 +316,12 @@ def plot_all(df_real, df_future):
     df_real['date'] = pd.to_datetime(df_real.index)
     df_future['date'] = pd.to_datetime(df_future['date'])
 
-    # 直接取最後一天歷史資料開始畫
-    df_plot_real = df_real.iloc[-1:]  # 只取最後一天
+    # 取得今天日期
+    today = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
+
+    # 找出歷史資料中最接近今天的那一天
+    last_hist_date = df_real[df_real['date'] <= today]['date'].max()
+    df_plot_real = df_real[df_real['date'] == last_hist_date]
 
     plt.figure(figsize=(12,6))
 
@@ -342,11 +346,11 @@ def plot_all(df_real, df_future):
     results_dir = "results"
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
-    today = datetime.now().strftime("%Y-%m-%d")
-    file_path = f"{results_dir}/{today}.png"
+    file_path = f"{results_dir}/{today.strftime('%Y-%m-%d')}.png"
     plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"📌 圖片已儲存：{file_path}")
+
 
 # ============================ ▶️ 主流程 ============================
 if __name__ == "__main__":
