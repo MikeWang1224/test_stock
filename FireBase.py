@@ -162,7 +162,8 @@ def predict_future_ma(model, scaler_x, scaler_y, X_scaled, df, future_days=10):
 
 # ============================ 📈 畫圖 ============================
 def plot_all(df_real, df_future, hist_days=30):
-    df_real['date'] = pd.to_datetime(df_real.index)
+    # 移除時區
+    df_real['date'] = pd.to_datetime(df_real.index).dt.tz_localize(None)
     df_future['date'] = pd.to_datetime(df_future['date'])
 
     today = pd.Timestamp(datetime.now().date())
@@ -196,6 +197,7 @@ def plot_all(df_real, df_future, hist_days=30):
     plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"📌 圖片已儲存：{file_path}")
+
 
 # ============================ ▶️ 主流程 ============================
 if __name__ == "__main__":
