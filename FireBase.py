@@ -7,6 +7,7 @@
  - 時序 train/test split（避免資料洩漏）
  - EarlyStopping / ModelCheckpoint / 更好的 scaler 使用
  - 評估使用 MAE / RMSE，並以預測 closes 計算 Pred MA5/MA10 做最終比對
+ - 圖表只顯示交易日，預測線與歷史線連接
 """
 import os, json
 import firebase_admin
@@ -136,19 +137,13 @@ def save_to_firestore(df):
 
 # ---------------- 建資料集（用 sliding window） ----------------
 def create_sequences(df, features, target_steps=10, window=60):
-    """
-    X: sequences of 'window' days of feature vectors
-    y: next target_steps of Close values
-    """
     X, y = [], []
     closes = df['Close'].values
     data = df[features].values
     for i in range(window, len(df) - target_steps + 1):
         X.append(data[i-window:i])
-        y.append(closes[i:i+target_steps])  # next target_steps closes
-    X = np.array(X)
-    y = np.array(y)
-    return X, y
+        y.append(closes[i:i+target_steps])
+    return np.array(X), np.array(y)
 
 # ---------------- 建模型（multi-step LSTM） ----------------
 def build_lstm_multi_step(input_shape, output_steps=10):
@@ -157,65 +152,41 @@ def build_lstm_multi_step(input_shape, output_steps=10):
     model.add(Dropout(0.2))
     model.add(LSTM(64))
     model.add(Dropout(0.2))
-    model.add(Dense(output_steps))  # output future closes for next N days
-    model.compile(optimizer='adam', loss='mae')  # MAE 損失
+    model.add(Dense(output_steps))
+    model.compile(optimizer='adam', loss='mae')
     return model
 
-# ---------------- 時序 train/test split（最簡單的 time-based split） ----------------
+# ---------------- 時序 train/test split ----------------
 def time_series_split(X, y, test_ratio=0.15):
     n = len(X)
     test_n = int(n * test_ratio)
     split_idx = n - test_n
-    X_train, X_test = X[:split_idx], X[split_idx:]
-    y_train, y_test = y[:split_idx], y[split_idx:]
-    return X_train, X_test, y_train, y_test
+    return X[:split_idx], X[split_idx:], y[:split_idx], y[split_idx:]
 
-# ---------------- 從預測 closes 計算 MA5 / MA10（以模型輸出為基礎） ----------------
+# ---------------- 從預測 closes 計算 MA5 / MA10 ----------------
 def compute_pred_ma_from_pred_closes(last_known_closes, pred_closes):
-    """
-    last_known_closes: array of close values up to today (需包含足夠長度計算 MA)
-    pred_closes: array (n_steps,) 模型預測的未來 closes（按時間順序）
-    依序把預測 append 到 last_known_closes，再計算每個未來日的 MA5/M A10
-    回傳 dataframe: date, Pred_Close, Pred_MA5, Pred_MA10
-    """
-    closes_seq = list(last_known_closes)[:]  # copy
+    closes_seq = list(last_known_closes)
     results = []
     for pc in pred_closes:
         closes_seq.append(pc)
-        # compute MA5 & MA10 using last available values
         ma5 = np.mean(closes_seq[-5:]) if len(closes_seq) >= 5 else np.mean(closes_seq)
         ma10 = np.mean(closes_seq[-10:]) if len(closes_seq) >= 10 else np.mean(closes_seq)
         results.append((pc, ma5, ma10))
     return results
 
-# ---------------- 畫圖函式（只顯示交易日，x 軸用週刻度） ----------------
+# ---------------- 畫圖函式（交易日版，預測線連接歷史線） ----------------
 def plot_all(df_real, df_future, hist_days=60):
     df_real = df_real.copy()
     df_real['date'] = pd.to_datetime(df_real.index).tz_localize(None)
-
-    # 取最近 hist_days 個交易日
     df_plot_real = df_real.tail(hist_days)
-
-    # df_future 已為交易日，轉 datetime
     df_future = df_future.copy()
     df_future['date'] = pd.to_datetime(df_future['date'])
 
-    plt.figure(figsize=(16,8))
-
-    # 畫歷史線（只用交易日）
-    plt.plot(df_plot_real['date'], df_plot_real['Close'], label="Close")
-    if 'SMA_5' in df_plot_real.columns:
-        plt.plot(df_plot_real['date'], df_plot_real['SMA_5'], label="SMA5")
-    if 'SMA_10' in df_plot_real.columns:
-        plt.plot(df_plot_real['date'], df_plot_real['SMA_10'], label="SMA10")
-
-    # 將最後一天歷史收盤價接到預測線的起點
+    # 將最後一天歷史加入預測線開頭
     last_hist_date = df_plot_real['date'].iloc[-1]
     last_hist_close = df_plot_real['Close'].iloc[-1]
     last_sma5 = df_plot_real['SMA_5'].iloc[-1] if 'SMA_5' in df_plot_real.columns else last_hist_close
     last_sma10 = df_plot_real['SMA_10'].iloc[-1] if 'SMA_10' in df_plot_real.columns else last_hist_close
-
-    # 把最後一天加入預測 dataframe 開頭，確保連線
     df_future_plot = pd.concat([
         pd.DataFrame([{
             "date": last_hist_date,
@@ -226,14 +197,18 @@ def plot_all(df_real, df_future, hist_days=60):
         df_future
     ], ignore_index=True)
 
-    # 畫預測線（只顯示交易日）
+    plt.figure(figsize=(16,8))
+    plt.plot(df_plot_real['date'], df_plot_real['Close'], label="Close")
+    if 'SMA_5' in df_plot_real.columns:
+        plt.plot(df_plot_real['date'], df_plot_real['SMA_5'], label="SMA5")
+    if 'SMA_10' in df_plot_real.columns:
+        plt.plot(df_plot_real['date'], df_plot_real['SMA_10'], label="SMA10")
+
     plt.plot(df_future_plot['date'], df_future_plot['Pred_Close'], ':', label='Pred Close')
     plt.plot(df_future_plot['date'], df_future_plot['Pred_MA5'], '--', label="Pred MA5")
     plt.plot(df_future_plot['date'], df_future_plot['Pred_MA10'], '--', label="Pred MA10")
 
-    # X 軸顯示日期，但只用交易日，避免週末假日空白
     plt.xticks(df_future_plot['date'], [d.strftime('%m-%d') for d in df_future_plot['date']], rotation=45)
-
     plt.legend()
     plt.title("2301.TW 歷史 + 預測（交易日）")
     plt.xlabel("Date")
@@ -247,132 +222,89 @@ def plot_all(df_real, df_future, hist_days=60):
     plt.close()
     print("📌 圖片已儲存：", file_path)
 
-
 # ---------------- 主流程 ----------------
 if __name__ == "__main__":
-    # 參數
     TICKER = "2301.TW"
-    LOOKBACK = 60            # window size
-    PRED_STEPS = 10          # 要預測未來 10 日 Close (交易日)
-    PERIOD = "18mo"          # 用更多歷史能幫助訓練（可調）
+    LOOKBACK = 60
+    PRED_STEPS = 10
+    PERIOD = "18mo"
     TEST_RATIO = 0.15
 
-    # 抓資料 + 特徵
     df = fetch_and_prepare(ticker=TICKER, period=PERIOD)
     df = update_today_from_firestore(df)
-    # 可選：save_to_firestore(df)
 
-    # 需要的特徵欄位 (可再擴充)
     features = ['Close', 'Volume', 'RET_1', 'LOG_RET_1', 'Close_minus_SMA5',
                 'SMA5_minus_SMA10', 'ATR_14', 'BB_width', 'OBV', 'OBV_SMA_20',
                 'Vol_SMA_5']
+    df_features = df[features].dropna()
 
-    df_features = df[features].copy()
-    df_features = df_features.dropna()
-
-    # create sequences
     X, y = create_sequences(df_features, features, target_steps=PRED_STEPS, window=LOOKBACK)
     print("X shape:", X.shape, "y shape:", y.shape)
-
-    # train/test split (time-based)
     X_train, X_test, y_train, y_test = time_series_split(X, y, test_ratio=TEST_RATIO)
     print("Train:", X_train.shape, "Test:", X_test.shape)
 
-    # scaler: flatten time dimension for scaler fitting
+    # Scaler
     nsamples, tw, nfeatures = X_train.shape
-    X_train_2d = X_train.reshape((nsamples*tw, nfeatures))
     scaler_x = MinMaxScaler()
-    scaler_x.fit(X_train_2d)
-
+    scaler_x.fit(X_train.reshape((nsamples*tw, nfeatures)))
     def scale_X(X_raw):
         s = X_raw.reshape((-1, X_raw.shape[-1]))
-        s = scaler_x.transform(s)
-        return s.reshape((X_raw.shape[0], X_raw.shape[1], X_raw.shape[2]))
+        return scaler_x.transform(s).reshape(X_raw.shape)
+    X_train_s, X_test_s = scale_X(X_train), scale_X(X_test)
 
-    X_train_s = scale_X(X_train)
-    X_test_s = scale_X(X_test)
-
-    # y scaler: scale closes (逐 step)
     scaler_y = MinMaxScaler()
-    y_train_2d = y_train  # shape (n_samples, PRED_STEPS)
-    scaler_y.fit(y_train_2d)  # treat multi-output scaling
-    y_train_s = scaler_y.transform(y_train_2d)
-    y_test_s = scaler_y.transform(y_test)
+    scaler_y.fit(y_train)
+    y_train_s, y_test_s = scaler_y.transform(y_train), scaler_y.transform(y_test)
 
-    # build model
     model = build_lstm_multi_step(input_shape=(LOOKBACK, nfeatures), output_steps=PRED_STEPS)
     model.summary()
 
-    # callbacks
-    model_dir = "models"
-    os.makedirs(model_dir, exist_ok=True)
-    ckpt_path = f"{model_dir}/{TICKER}_best.h5"
+    os.makedirs("models", exist_ok=True)
+    ckpt_path = f"models/{TICKER}_best.h5"
     es = EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1)
     mc = ModelCheckpoint(ckpt_path, monitor='val_loss', save_best_only=True, verbose=1)
 
-    # train
-    history = model.fit(X_train_s, y_train_s,
-                        validation_data=(X_test_s, y_test_s),
-                        epochs=80, batch_size=32,
-                        callbacks=[es, mc], verbose=2)
+    history = model.fit(X_train_s, y_train_s, validation_data=(X_test_s, y_test_s),
+                        epochs=80, batch_size=32, callbacks=[es, mc], verbose=2)
 
-    # predict (用整個測試集最後一個 window 做示範預測，或你可以做 rolling prediction)
     pred_s = model.predict(X_test_s)
-    pred = scaler_y.inverse_transform(pred_s)  # shape (n_test_samples, PRED_STEPS)
+    pred = scaler_y.inverse_transform(pred_s)
 
-    # 評估：對每個預測 horizon 計算 MAE / RMSE（也可聚合）
-    maes = []
-    rmses = []
+    # 評估
+    maes, rmses = [], []
     for step in range(PRED_STEPS):
-        y_true = y_test[:, step]
-        y_pred = pred[:, step]
-        mae = mean_absolute_error(y_true, y_pred)
-        rmse = math.sqrt(mean_squared_error(y_true, y_pred))
-        maes.append(mae); rmses.append(rmse)
-    print("MAE per step:", np.round(maes, 4))
-    print("RMSE per step:", np.round(rmses, 4))
+        y_true, y_pred = y_test[:, step], pred[:, step]
+        maes.append(mean_absolute_error(y_true, y_pred))
+        rmses.append(math.sqrt(mean_squared_error(y_true, y_pred)))
+    print("MAE per step:", np.round(maes,4))
+    print("RMSE per step:", np.round(rmses,4))
     print("Avg MAE:", np.round(np.mean(maes),4))
 
-    # 將最後一組 X_test 的最後一個 window 視為「今天的已知序列」
-    last_known_index = -1
-    last_known_window = X_test[last_known_index]  # shape (LOOKBACK, nfeatures)
-    last_known_closes = list(last_known_window[:, 0])  # 最後知道的 LOOKBACK 個 close
+    last_known_window = X_test[-1]
+    last_known_closes = list(last_known_window[:,0])
+    results = compute_pred_ma_from_pred_closes(last_known_closes, pred[-1])
 
-    pred_of_last = pred[last_known_index]  # length PRED_STEPS
-    results = compute_pred_ma_from_pred_closes(last_known_closes, pred_of_last)
-
-    # build df_future_preds using 商業日（交易日）序列
     today = pd.Timestamp(datetime.now().date())
-    # 下一個交易日開始（BDay(1)代表下一個工作日）
     first_bday = (today + BDay(1)).date()
-    business_days = pd.bdate_range(start=first_bday, periods=PRED_STEPS).to_pydatetime()
-    future_dates = [pd.Timestamp(d).normalize() for d in business_days]
-
+    business_days = pd.bdate_range(start=first_bday, periods=PRED_STEPS)
     df_future = pd.DataFrame({
-        "date": future_dates,
+        "date": business_days,
         "Pred_Close": [r[0] for r in results],
         "Pred_MA5": [r[1] for r in results],
         "Pred_MA10": [r[2] for r in results]
     })
 
-    # 儲存圖片（呼叫修正後 plot_all）
-    results_dir = "results"
-    os.makedirs(results_dir, exist_ok=True)
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    plot_path = f"{results_dir}/{today_str}_future_pred.png"
     plot_all(df, df_future, hist_days=60)
-
-    # 印出未來預測表
     print(df_future)
 
-    # 選擇性：把預測寫回 Firestore（視需求）
+    # 寫入 Firestore
     if db is not None:
         for i, row in df_future.iterrows():
-            date_str = row['date'].strftime("%Y-%m-%d")
-            data = {
-                "Pred_Close": float(row['Pred_Close']),
-                "Pred_MA5": float(row['Pred_MA5']),
-                "Pred_MA10": float(row['Pred_MA10'])
-            }
-            db.collection("NEW_stock_data_liteon_preds").document(date_str).set({"2301.TW": data})
+            db.collection("NEW_stock_data_liteon_preds").document(row['date'].strftime("%Y-%m-%d")).set({
+                "2301.TW": {
+                    "Pred_Close": float(row['Pred_Close']),
+                    "Pred_MA5": float(row['Pred_MA5']),
+                    "Pred_MA10": float(row['Pred_MA10'])
+                }
+            })
         print("🔥 預測寫入 Firestore 完成")
