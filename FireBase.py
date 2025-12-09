@@ -180,17 +180,17 @@ def plot_all(df_real, df_future, hist_days=60):
     df_real = df_real.tail(hist_days)
     df_future = df_future.copy()
 
-    # 使用 index 作為連續 X 軸
     plt.figure(figsize=(16,8))
 
-    # 歷史收盤線
-    plt.plot(range(len(df_real)), df_real['Close'], label="Close")
+    # 歷史線（連續索引）
+    x_real = range(len(df_real))
+    plt.plot(x_real, df_real['Close'], label="Close")
     if 'SMA_5' in df_real.columns:
-        plt.plot(range(len(df_real)), df_real['SMA_5'], label="SMA5")
+        plt.plot(x_real, df_real['SMA_5'], label="SMA5")
     if 'SMA_10' in df_real.columns:
-        plt.plot(range(len(df_real)), df_real['SMA_10'], label="SMA10")
+        plt.plot(x_real, df_real['SMA_10'], label="SMA10")
 
-    # 將最後一天歷史加入預測開頭
+    # 預測線從最後一個歷史點開始
     last_hist_close = df_real['Close'].iloc[-1]
     last_sma5 = df_real['SMA_5'].iloc[-1] if 'SMA_5' in df_real.columns else last_hist_close
     last_sma10 = df_real['SMA_10'].iloc[-1] if 'SMA_10' in df_real.columns else last_hist_close
@@ -204,12 +204,12 @@ def plot_all(df_real, df_future, hist_days=60):
         df_future
     ], ignore_index=True)
 
-    # 預測線（連續）
-    plt.plot(range(len(df_real)-1, len(df_real)-1+len(df_future_plot)), df_future_plot['Pred_Close'], ':', label='Pred Close')
-    plt.plot(range(len(df_real)-1, len(df_real)-1+len(df_future_plot)), df_future_plot['Pred_MA5'], '--', label="Pred MA5")
-    plt.plot(range(len(df_real)-1, len(df_real)-1+len(df_future_plot)), df_future_plot['Pred_MA10'], '--', label="Pred MA10")
+    x_future = range(len(df_real)-1, len(df_real)-1+len(df_future_plot))
+    plt.plot(x_future, df_future_plot['Pred_Close'], ':', label='Pred Close')
+    plt.plot(x_future, df_future_plot['Pred_MA5'], '--', label="Pred MA5")
+    plt.plot(x_future, df_future_plot['Pred_MA10'], '--', label="Pred MA10")
 
-    # X 軸標記用交易日日期
+    # X 軸刻度只顯示交易日日期
     all_dates = list(df_real.index) + list(df_future['date'])
     tick_pos = range(0, len(all_dates), max(1, len(all_dates)//10))
     tick_labels = [pd.Timestamp(d).strftime('%m-%d') for i,d in enumerate(all_dates) if i in tick_pos]
@@ -225,6 +225,7 @@ def plot_all(df_real, df_future, hist_days=60):
     plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
     print("📌 圖片已儲存：", file_path)
+
 
 
 # ---------------- 主流程 ----------------
