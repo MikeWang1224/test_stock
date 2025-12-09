@@ -17,6 +17,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from pandas.tseries.offsets import BDay
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from tensorflow.keras.models import Sequential
@@ -187,7 +188,7 @@ def compute_pred_ma_from_pred_closes(last_known_closes, pred_closes):
         results.append((pc, ma5, ma10))
     return results
 
-# ---------------- 畫圖函式 ----------------
+# ---------------- 畫圖函式（只顯示交易日，x 軸用週刻度） ----------------
 def plot_all(df_real, df_future, hist_days=60):
     df_real = df_real.copy()
     df_real['date'] = pd.to_datetime(df_real.index).tz_localize(None)
@@ -195,24 +196,26 @@ def plot_all(df_real, df_future, hist_days=60):
     # 取最近 hist_days 個「交易日」
     df_plot_real = df_real.tail(hist_days)
 
-    # 只顯示預測部分的交易日（排除六日）
+    # df_future 已為商業日（下方 main 產生），但仍轉成 datetime
     df_future = df_future.copy()
     df_future['date'] = pd.to_datetime(df_future['date'])
-    df_future = df_future[df_future['date'].dt.weekday < 5]   # 0=Mon ... 4=Fri
 
     plt.figure(figsize=(16,8))
 
     # 畫歷史線（交易日自然連接）
     plt.plot(df_plot_real['date'], df_plot_real['Close'], label="Close")
-    plt.plot(df_plot_real['date'], df_plot_real['SMA_5'], label="SMA5")
-    plt.plot(df_plot_real['date'], df_plot_real['SMA_10'], label="SMA10")
+    if 'SMA_5' in df_plot_real.columns:
+        plt.plot(df_plot_real['date'], df_plot_real['SMA_5'], label="SMA5")
+    if 'SMA_10' in df_plot_real.columns:
+        plt.plot(df_plot_real['date'], df_plot_real['SMA_10'], label="SMA10")
 
-    # 畫預測線（也是交易日 → 保證接續）
+    # 畫預測線（使用商業日日期）
+    plt.plot(df_future['date'], df_future['Pred_Close'], ':', label='Pred Close')
     plt.plot(df_future['date'], df_future['Pred_MA5'], '--', label="Pred MA5")
     plt.plot(df_future['date'], df_future['Pred_MA10'], '--', label="Pred MA10")
 
-    # x 軸格式：只顯示交易日，不是每天
-    plt.gca().xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+    # x 軸格式：每週一個刻度（避免過密）
+    plt.gca().xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MO, interval=1))
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
     plt.gcf().autofmt_xdate(rotation=45)
 
@@ -231,13 +234,12 @@ def plot_all(df_real, df_future, hist_days=60):
     print("📌 圖片已儲存：", file_path)
 
 
-
 # ---------------- 主流程 ----------------
 if __name__ == "__main__":
     # 參數
     TICKER = "2301.TW"
     LOOKBACK = 60            # window size
-    PRED_STEPS = 10          # 要預測未來 10 日 Close
+    PRED_STEPS = 10          # 要預測未來 10 日 Close (交易日)
     PERIOD = "18mo"          # 用更多歷史能幫助訓練（可調）
     TEST_RATIO = 0.15
 
@@ -317,18 +319,21 @@ if __name__ == "__main__":
     print("RMSE per step:", np.round(rmses, 4))
     print("Avg MAE:", np.round(np.mean(maes),4))
 
-    # 將最後一組 X_test 的最後一個 window 視為「今天的已知序列」，示範如何把第一個測試樣本的預測做成 Pred_MA5/MA10
+    # 將最後一組 X_test 的最後一個 window 視為「今天的已知序列」
     last_known_index = -1
     last_known_window = X_test[last_known_index]  # shape (LOOKBACK, nfeatures)
-    # 注意：第 0 feature 是 Close（我們包含 Close 在 features 的第一位）
     last_known_closes = list(last_known_window[:, 0])  # 最後知道的 LOOKBACK 個 close
 
     pred_of_last = pred[last_known_index]  # length PRED_STEPS
     results = compute_pred_ma_from_pred_closes(last_known_closes, pred_of_last)
 
-    # build df_future_preds
+    # build df_future_preds using 商業日（交易日）序列
     today = pd.Timestamp(datetime.now().date())
-    future_dates = [today + timedelta(days=i+1) for i in range(PRED_STEPS)]
+    # 下一個交易日開始（BDay(1)代表下一個工作日）
+    first_bday = (today + BDay(1)).date()
+    business_days = pd.bdate_range(start=first_bday, periods=PRED_STEPS).to_pydatetime()
+    future_dates = [pd.Timestamp(d).normalize() for d in business_days]
+
     df_future = pd.DataFrame({
         "date": future_dates,
         "Pred_Close": [r[0] for r in results],
@@ -336,12 +341,12 @@ if __name__ == "__main__":
         "Pred_MA10": [r[2] for r in results]
     })
 
-    # 儲存圖片
+    # 儲存圖片（呼叫修正後 plot_all）
     results_dir = "results"
     os.makedirs(results_dir, exist_ok=True)
     today_str = datetime.now().strftime("%Y-%m-%d")
     plot_path = f"{results_dir}/{today_str}_future_pred.png"
-    plot_results(df, df_future, plot_path)
+    plot_all(df, df_future, hist_days=60)
 
     # 印出未來預測表
     print(df_future)
