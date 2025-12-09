@@ -313,20 +313,25 @@ def predict_future_ma(model, scaler_x, scaler_y, X_scaled, df):
 
 # ============================ 📈 畫圖（每日刻度 + 從今天開始） ============================
 import pytz
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from datetime import datetime, timedelta
 
 def plot_all(df_real, df_future, hist_days=30):
-    df_real['date'] = pd.to_datetime(df_real.index)
-    df_future['date'] = pd.to_datetime(df_future['date'])
-
-    # 取得台灣時間昨天日期
+    # 轉成 datetime（帶時區）
     tz = pytz.timezone("Asia/Taipei")
-    today = datetime.now(tz).date()
-    yesterday = today - timedelta(days=1)
+    df_real['date'] = pd.to_datetime(df_real.index).tz_localize(None)  # 移除原本可能有的時區
+    df_future['date'] = pd.to_datetime(df_future['date']).tz_localize(None)
 
-    # 篩選從昨天往前 hist_days 天的資料
-    df_plot_real = df_real[df_real['date'] <= yesterday].iloc[-hist_days:]
+    # 取得最後交易日（歷史資料最後一筆）
+    last_trade_date = df_real['date'].max()
+    # 從昨天開始畫
+    start_date = last_trade_date - timedelta(days=hist_days-1)
 
-    plt.figure(figsize=(16,8))  # 放大圖尺寸
+    # 篩選歷史資料
+    df_plot_real = df_real[df_real['date'] >= start_date]
+
+    plt.figure(figsize=(16,8))
 
     # 畫歷史實線
     plt.plot(df_plot_real['date'], df_plot_real['Close'], label="Close", color="blue", linestyle='-')
@@ -337,11 +342,12 @@ def plot_all(df_real, df_future, hist_days=30):
     plt.plot(df_future['date'], df_future['Pred_MA5'], '--', label="Pred MA5", color="lime")
     plt.plot(df_future['date'], df_future['Pred_MA10'], '--', label="Pred MA10", color="red")
 
-    # X 軸以日為單位，範圍從歷史到預測最後一天
+    # X 軸範圍從歷史到預測最後一天
     all_dates = pd.concat([df_plot_real['date'], df_future['date']])
     plt.xlim(all_dates.min(), all_dates.max())
 
-    plt.gca().xaxis.set_major_locator(plt.MultipleLocator(1))
+    plt.gca().xaxis.set_major_locator(mdates.DayLocator(interval=1))
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
     plt.gcf().autofmt_xdate(rotation=45)
 
     plt.legend()
@@ -352,7 +358,8 @@ def plot_all(df_real, df_future, hist_days=30):
     results_dir = "results"
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
-    file_path = f"{results_dir}/{today}.png"
+    today_str = datetime.now(tz).strftime("%Y-%m-%d")
+    file_path = f"{results_dir}/{today_str}.png"
     plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"📌 圖片已儲存：{file_path}")
