@@ -62,7 +62,19 @@ def fetch_and_calculate():
     df['Fut_MA5'] = df['Close'].rolling(5).mean().shift(-4)
     df['Fut_MA10'] = df['Close'].rolling(10).mean().shift(-9)
 
-    return df.dropna()
+    return df
+
+# ============================ 🔄 更新今天收盤價從 Firebase ============================
+def update_today_from_firestore(df):
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    doc_ref = db.collection("NEW_stock_data_liteon").document(today_str)
+    doc = doc_ref.get()
+    if doc.exists:
+        data = doc.to_dict().get("2301.TW", {})
+        if "Close" in data:
+            df.loc[pd.Timestamp(today_str), 'Close'] = data["Close"]
+    df = df.dropna()
+    return df
 
 # ============================ 💾 寫入 Firestore ============================
 def save_to_firestore(df):
@@ -137,8 +149,8 @@ def predict_future_ma(model, scaler_x, scaler_y, X_scaled, df, future_days=10):
     future_array = np.array(future)
     future_ma = scaler_y.inverse_transform(future_array)
 
-    last_date = pd.to_datetime(df.index[-1])
-    dates = [last_date + timedelta(days=i) for i in range(1, future_days+1)]
+    today = pd.Timestamp(datetime.now().date())
+    dates = [today + timedelta(days=i) for i in range(1, future_days+1)]
 
     df_future = pd.DataFrame({
         "date": dates,
@@ -153,9 +165,8 @@ def plot_all(df_real, df_future, hist_days=30):
     df_real['date'] = pd.to_datetime(df_real.index)
     df_future['date'] = pd.to_datetime(df_future['date'])
 
-    # 取得最後交易日，從今天開始畫 hist_days 天歷史
-    last_trade_date = df_real['date'].max()
-    start_date = last_trade_date - timedelta(days=hist_days-1)
+    today = pd.Timestamp(datetime.now().date())
+    start_date = today - timedelta(days=hist_days-1)
     df_plot_real = df_real[df_real['date'] >= start_date]
 
     plt.figure(figsize=(16,8))
@@ -167,13 +178,13 @@ def plot_all(df_real, df_future, hist_days=30):
     plt.plot(df_future['date'], df_future['Pred_MA10'], '--', label="Pred MA10", color="red")
 
     all_dates = pd.concat([df_plot_real['date'], df_future['date']])
-    plt.xlim(all_dates.min(), all_dates.max())
+    plt.xlim(today, all_dates.max())
     plt.gca().xaxis.set_major_locator(mdates.DayLocator(interval=1))
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
     plt.gcf().autofmt_xdate(rotation=45)
 
     plt.legend()
-    plt.title("2301.TW 歷史 + 預測 5/10 日線（每日刻度）")
+    plt.title("2301.TW 今日起 + 預測 5/10 日線")
     plt.xlabel("Date")
     plt.ylabel("Price")
 
@@ -181,7 +192,7 @@ def plot_all(df_real, df_future, hist_days=30):
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     today_str = datetime.now().strftime("%Y-%m-%d")
-    file_path = f"{results_dir}/{today_str}.png"
+    file_path = f"{results_dir}/{today_str}_future.png"
     plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"📌 圖片已儲存：{file_path}")
@@ -189,6 +200,7 @@ def plot_all(df_real, df_future, hist_days=30):
 # ============================ ▶️ 主流程 ============================
 if __name__ == "__main__":
     df = fetch_and_calculate()
+    df = update_today_from_firestore(df)   # ✅ 用 Firebase 更新今天資料
     save_to_firestore(df)
 
     model, scaler_x, scaler_y, X_scaled = train_lstm(df)
