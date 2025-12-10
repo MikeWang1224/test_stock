@@ -55,7 +55,7 @@ def add_technical_features(df):
     df['Close_minus_SMA5'] = df['Close'] - df['SMA_5']
     df['SMA5_minus_SMA10'] = df['SMA_5'] - df['SMA_10']
 
-    # ATR (Average True Range)
+    # ATR
     high_low = df['High'] - df['Low']
     high_close = (df['High'] - df['Close'].shift(1)).abs()
     low_close = (df['Low'] - df['Close'].shift(1)).abs()
@@ -69,7 +69,7 @@ def add_technical_features(df):
     df['BB_lower'] = df['BB_mid'] - 2 * df['BB_std']
     df['BB_width'] = (df['BB_upper'] - df['BB_lower']) / df['BB_mid']
 
-    # OBV (On Balance Volume)
+    # OBV
     obv = [0]
     for i in range(1, len(df)):
         if df['Close'].iloc[i] > df['Close'].iloc[i-1]:
@@ -81,11 +81,10 @@ def add_technical_features(df):
     df['OBV'] = obv
     df['OBV_SMA_20'] = df['OBV'].rolling(20).mean()
 
-    # Volume moving average
+    # Volume MA
     df['Vol_SMA_5'] = df['Volume'].rolling(5).mean()
     df['Vol_SMA_20'] = df['Volume'].rolling(20).mean()
 
-    # fill / drop
     df = df.dropna()
     return df
 
@@ -113,29 +112,7 @@ def update_today_from_firestore(df):
     df = df.dropna()
     return df
 
-# ---------------- 儲存到 Firestore（選用） ----------------
-def save_to_firestore(df):
-    if db is None:
-        print("跳過 Firestore 寫入（未設定）")
-        return
-    selected = ['Close', 'MACD', 'RSI', 'K', 'D', 'Volume'] if 'MACD' in df.columns else ['Close', 'Volume']
-    collection = "NEW_stock_data_liteon"
-    batch = db.batch()
-    count = 0
-    for idx, row in df.iterrows():
-        date_str = idx.strftime("%Y-%m-%d")
-        data = {col: float(row[col]) for col in selected if col in row and not pd.isna(row[col])}
-        doc_ref = db.collection(collection).document(date_str)
-        batch.set(doc_ref, {"2301.TW": data})
-        count += 1
-        if count >= 300:
-            batch.commit()
-            batch = db.batch()
-            count = 0
-    batch.commit()
-    print("🔥 Firestore 寫入完成")
-
-# ---------------- 建資料集（用 sliding window） ----------------
+# ---------------- 建資料集 ----------------
 def create_sequences(df, features, target_steps=10, window=60):
     X, y = [], []
     closes = df['Close'].values
@@ -145,7 +122,7 @@ def create_sequences(df, features, target_steps=10, window=60):
         y.append(closes[i:i+target_steps])
     return np.array(X), np.array(y)
 
-# ---------------- 建模型（multi-step LSTM） ----------------
+# ---------------- 建模型 ----------------
 def build_lstm_multi_step(input_shape, output_steps=10):
     model = Sequential()
     model.add(LSTM(128, return_sequences=True, input_shape=input_shape))
@@ -156,14 +133,14 @@ def build_lstm_multi_step(input_shape, output_steps=10):
     model.compile(optimizer='adam', loss='mae')
     return model
 
-# ---------------- 時序 train/test split ----------------
+# ---------------- 時序 split ----------------
 def time_series_split(X, y, test_ratio=0.15):
     n = len(X)
     test_n = int(n * test_ratio)
     split_idx = n - test_n
     return X[:split_idx], X[split_idx:], y[:split_idx], y[split_idx:]
 
-# ---------------- 從預測 closes 計算 MA5 / MA10 ----------------
+# ---------------- MA 計算 ----------------
 def compute_pred_ma_from_pred_closes(last_known_closes, pred_closes):
     closes_seq = list(last_known_closes)
     results = []
@@ -174,14 +151,14 @@ def compute_pred_ma_from_pred_closes(last_known_closes, pred_closes):
         results.append((pc, ma5, ma10))
     return results
 
-# ---------------- 畫圖函式（交易日版，預測線連接歷史線） ----------------
+# ---------------- 圖表（只顯示 10 日歷史） ----------------
 def plot_all(df_real, df_future, hist_days=60):
     df_real = df_real.copy()
-    df_real = df_real.tail(10)  # 顯示最近兩週（約 10 根交易日）
+    df_real = df_real.tail(10)  # 僅顯示最近 10 根交易日
 
     plt.figure(figsize=(16,8))
 
-    # 用交易日索引作 X
+    # 歷史線
     x_real = range(len(df_real))
     plt.plot(x_real, df_real['Close'], label="Close")
     if 'SMA_5' in df_real.columns:
@@ -189,7 +166,7 @@ def plot_all(df_real, df_future, hist_days=60):
     if 'SMA_10' in df_real.columns:
         plt.plot(x_real, df_real['SMA_10'], label="SMA10")
 
-    # 預測線從最後一個歷史點開始
+    # 將預測首點與歷史最後一點連接
     last_hist_close = df_real['Close'].iloc[-1]
     last_sma5 = df_real['SMA_5'].iloc[-1] if 'SMA_5' in df_real.columns else last_hist_close
     last_sma10 = df_real['SMA_10'].iloc[-1] if 'SMA_10' in df_real.columns else last_hist_close
@@ -203,17 +180,22 @@ def plot_all(df_real, df_future, hist_days=60):
         df_future
     ], ignore_index=True)
 
-    x_future = range(len(df_real)-1, len(df_real)-1+len(df_future_plot))
-    plt.plot(x_future, df_future_plot['Pred_Close'], ':', label='Pred Close')
+    x_future = range(len(df_real)-1, len(df_real)-1 + len(df_future_plot))
+    plt.plot(x_future, df_future_plot['Pred_Close'], ':', label="Pred Close")
     plt.plot(x_future, df_future_plot['Pred_MA5'], '--', label="Pred MA5")
     plt.plot(x_future, df_future_plot['Pred_MA10'], '--', label="Pred MA10")
 
-    # X 軸刻度：每天一個刻度
+    # X 軸日期刻度
     all_dates = list(df_real.index) + list(df_future['date'])
-    plt.xticks(range(len(all_dates)), [pd.Timestamp(d).strftime('%m-%d') for d in all_dates], rotation=45)
+    plt.xticks(
+        ticks=range(len(all_dates)),
+        labels=[pd.Timestamp(d).strftime('%m-%d') for d in all_dates],
+        rotation=45
+    )
+    plt.xlim(0, len(all_dates) - 1)
 
     plt.legend()
-    plt.title("2301.TW 歷史 + 預測（交易日連續）")
+    plt.title("2301.TW 歷史 + 預測（近 10 日 + 未來 10 日）")
     plt.xlabel("Date")
     plt.ylabel("Price")
 
@@ -222,10 +204,6 @@ def plot_all(df_real, df_future, hist_days=60):
     plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
     print("📌 圖片已儲存：", file_path)
-
-
-
-
 
 # ---------------- 主流程 ----------------
 if __name__ == "__main__":
@@ -246,7 +224,6 @@ if __name__ == "__main__":
     X, y = create_sequences(df_features, features, target_steps=PRED_STEPS, window=LOOKBACK)
     print("X shape:", X.shape, "y shape:", y.shape)
     X_train, X_test, y_train, y_test = time_series_split(X, y, test_ratio=TEST_RATIO)
-    print("Train:", X_train.shape, "Test:", X_test.shape)
 
     # Scaler
     nsamples, tw, nfeatures = X_train.shape
@@ -299,7 +276,8 @@ if __name__ == "__main__":
         "Pred_MA10": [r[2] for r in results]
     })
 
-    plot_all(df, df_future, hist_days=60)
+    plot_all(df, df_future)
+
     print(df_future)
 
     # 寫入 Firestore
