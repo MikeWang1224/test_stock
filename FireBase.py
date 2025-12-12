@@ -1,25 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-完整整合版：TCN + multi-step returns (預測未來 10 日 return) -> 反推 Close -> 計算 MA5/MA10
-功能：
- - 下載歷史 (yfinance)
- - 計算技術指標（EMA、SMA、MACD hist、RSI、StochRSI、HV、ATR、BB、OBV、lag features、時間因子）
- - 建 dataset (X: 多特徵時間序列, y: 未來 10 天 return)
- - 時序 split (walk-forward-ish using time_series_split)
- - 建 TCN 模型訓練/驗證
- - 預測並反推未來 Close / MA
- - 繪圖、上傳 Firebase Storage（若設定）
- - 寫入 Firestore 歷史資料與預測（若設定）
+FireBase.py
+完整版：TCN + multi-step returns pipeline
+- features auto-align (避免 scaler n_features mismatch)
+- TCN 模型訓練、預測、return -> close 轉換
+- 繪圖並上傳 Firebase Storage（若設定）
+- 寫入 Firestore（若設定）
 """
-import os, json, math, random
+
+import os
+import json
+import math
 from datetime import datetime
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
+from pandas.tseries.offsets import BDay
 
-# ML / DL
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+# sklearn / tensorflow
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, Dropout, Flatten, Dense
@@ -29,7 +29,6 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import firebase_admin
 from firebase_admin import credentials, firestore
 from google.cloud import storage
-from pandas.tseries.offsets import BDay
 
 # ---------------- Firebase 初始化（含 Storage） ----------------
 key_dict = json.loads(os.environ.get("FIREBASE", "{}"))
@@ -56,14 +55,17 @@ else:
 # ---------------- 指標 / 特徵函式 ----------------
 def add_basic_indicators(df):
     df = df.copy()
+
     # SMA
     df['SMA_5'] = df['Close'].rolling(window=5).mean()
     df['SMA_10'] = df['Close'].rolling(window=10).mean()
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
+
     # EMA
     for span in [5,10,20,50,100]:
         df[f'EMA_{span}'] = df['Close'].ewm(span=span, adjust=False).mean()
+
     # MACD hist
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df['Close'].ewm(span=26, adjust=False).mean()
@@ -71,6 +73,7 @@ def add_basic_indicators(df):
     signal = macd.ewm(span=9, adjust=False).mean()
     df['MACD'] = macd
     df['MACD_hist'] = macd - signal
+
     # RSI (14)
     delta = df['Close'].diff()
     gain = delta.where(delta > 0, 0)
@@ -79,21 +82,25 @@ def add_basic_indicators(df):
     avg_loss = loss.rolling(window=14).mean()
     rs = avg_gain / avg_loss
     df['RSI_14'] = 100 - (100 / (1 + rs))
-    # Stochastic RSI (StochRSI) approximate
+
+    # Stochastic RSI approximation
     rsi = df['RSI_14']
     df['StochRSI'] = (rsi - rsi.rolling(14).min()) / (rsi.rolling(14).max() - rsi.rolling(14).min())
+
     # ATR (14)
     high_low = df['High'] - df['Low']
     high_close = (df['High'] - df['Close'].shift(1)).abs()
     low_close = (df['Low'] - df['Close'].shift(1)).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR_14'] = tr.rolling(14).mean()
-    # Bollinger
+
+    # Bollinger Bands
     df['BB_mid'] = df['Close'].rolling(20).mean()
     df['BB_std'] = df['Close'].rolling(20).std()
     df['BB_upper'] = df['BB_mid'] + 2 * df['BB_std']
     df['BB_lower'] = df['BB_mid'] - 2 * df['BB_std']
     df['BB_width'] = (df['BB_upper'] - df['BB_lower']) / df['BB_mid']
+
     # OBV
     obv = [0]
     for i in range(1, len(df)):
@@ -105,6 +112,7 @@ def add_basic_indicators(df):
             obv.append(obv[-1])
     df['OBV'] = obv
     df['OBV_SMA_20'] = df['OBV'].rolling(20).mean()
+
     return df
 
 def add_lag_time_features(df, lags=[1,2,3,5,10], rolling_windows=[5,10,20]):
@@ -125,7 +133,7 @@ def add_lag_time_features(df, lags=[1,2,3,5,10], rolling_windows=[5,10,20]):
     df = df.fillna(0)
     return df
 
-# ---------------- fetch & prepare ----------------
+# ---------------- 取得資料並計指標 ----------------
 def fetch_and_prepare(ticker="2301.TW", period="36mo"):
     stock = yf.Ticker(ticker)
     df = stock.history(period=period)
@@ -156,16 +164,19 @@ def update_today_from_firestore(df):
     df = df.dropna()
     return df
 
-# ---------------- Save historical to Firestore ----------------
+# ---------------- 寫入股票資料回 Firestore（歷史資料） ----------------
 def save_stock_data_to_firestore(df, ticker="2301.TW", collection_name="NEW_stock_data_liteon"):
     if db is None:
         print("⚠️ Firebase 未啟用，略過寫入股票資料")
         return
+
     batch = db.batch()
     count = 0
     try:
         for idx, row in df.iterrows():
             date_str = idx.strftime("%Y-%m-%d")
+            # construct payload; only include required fields
+            payload = {}
             try:
                 payload = {
                     "Close": float(row["Close"]),
@@ -173,35 +184,34 @@ def save_stock_data_to_firestore(df, ticker="2301.TW", collection_name="NEW_stoc
                     "MACD": float(row.get("MACD", 0.0)),
                     "RSI": float(row.get("RSI_14", 0.0)),
                     "K": float(row.get("StochRSI", 0.0)),
-                    "D": float(row.get("SMA_5", 0.0))  # placeholder if needed
+                    "D": float(row.get("SMA_5", 0.0))  # placeholder
                 }
             except Exception:
                 continue
+
             doc_ref = db.collection(collection_name).document(date_str)
             batch.set(doc_ref, {ticker: payload})
             count += 1
+
             if count >= 300:
                 batch.commit()
                 batch = db.batch()
                 count = 0
+
         if count > 0:
             batch.commit()
+
         print(f"🔥 歷史股票資料已寫入 Firestore （collection: {collection_name}）")
     except Exception as e:
         print("❌ 寫入 Firestore 發生錯誤：", e)
 
-# ---------------- Dataset builder: returns target ----------------
+# ---------------- 建 dataset（returns） ----------------
 def build_multi_step_returns(df_features, close_col="Close", pred_steps=10, lookback=60, feature_cols=None):
-    """
-    df_features: dataframe containing all desired features (index = dates)
-    Returns: X (n_samples, lookback, n_features), y (n_samples, pred_steps) as returns
-    """
     if feature_cols is None:
         feature_cols = df_features.columns.tolist()
     closes = df_features[close_col].values
-    # returns: (t+1)/t - 1
     returns = closes[1:] / closes[:-1] - 1
-    returns = np.append(returns, 0)  # pad last
+    returns = np.append(returns, 0)
     X_list, y_list = [], []
     for i in range(len(df_features) - lookback - pred_steps):
         X_list.append(df_features[feature_cols].iloc[i:i+lookback].values)
@@ -209,7 +219,7 @@ def build_multi_step_returns(df_features, close_col="Close", pred_steps=10, look
         y_list.append(future_returns)
     X = np.array(X_list)
     y = np.array(y_list)
-    return X, y, feature_cols
+    return X, y
 
 # ---------------- TCN 模型 ----------------
 def build_tcn_multi_step(input_shape, output_steps=10):
@@ -248,7 +258,7 @@ def compute_metrics(y_true, y_pred):
         rmses.append(math.sqrt(mean_squared_error(y_true[:, step], y_pred[:, step])))
     return np.array(maes), np.array(rmses)
 
-# ---------------- MA from predictions (vectorized convenience) ----------------
+# ---------------- MA from predictions ----------------
 def compute_ma_from_predictions(last_known_window_closes, y_pred_matrix, ma_period=5):
     n_samples, window = last_known_window_closes.shape
     steps = y_pred_matrix.shape[1]
@@ -273,7 +283,32 @@ def compute_true_ma(last_window, y_true, ma_period=5):
             true_ma[i, t] = np.mean(look)
     return true_ma
 
-# ---------------- plotting + upload (your version, slightly adjusted to accept df index) ----------------
+# ---------------- align features helper ----------------
+def align_features_for_training_and_prediction(df, feature_cols, fill_method='ffill'):
+    """
+    Ensure df contains all feature_cols in the same order.
+    If a column missing:
+      - if column exists earlier in df (rare), attempt to forward-fill
+      - else fill with 0
+    Returns a dataframe with columns exactly feature_cols.
+    """
+    df2 = df.copy()
+    for c in feature_cols:
+        if c not in df2.columns:
+            # attempt to add from similar names? here we just add 0 and log
+            df2[c] = 0.0
+            # could also try df2[c] = df2.get(c+'_approx', 0)
+            print(f"⚠️ feature '{c}' not in df - filling with 0.0")
+    # reorder
+    df2 = df2[feature_cols]
+    # try to fill na sensibly
+    if fill_method == 'ffill':
+        df2 = df2.fillna(method='ffill').fillna(0.0)
+    else:
+        df2 = df2.fillna(0.0)
+    return df2
+
+# ---------------- plotting + upload (保留你的版面) ----------------
 def plot_and_upload_to_storage(df_real, df_future, bucket_obj=None, hist_days=10):
     df_real_plot = df_real.copy().tail(hist_days)
     if df_real_plot.empty:
@@ -338,7 +373,7 @@ def plot_and_upload_to_storage(df_real, df_future, bucket_obj=None, hist_days=10
                 blob.make_public()
                 public_url = blob.public_url
             except Exception:
-                public_url = blob.public_url if getattr(blob, 'public_url', None) else None
+                public_url = getattr(blob, 'public_url', None)
             print("🔥 圖片已上傳至 Storage：", public_url)
             return public_url
         except Exception as e:
@@ -346,101 +381,128 @@ def plot_and_upload_to_storage(df_real, df_future, bucket_obj=None, hist_days=10
             return None
     return None
 
+# ---------------- training helper (scalers + record feature_names) ----------------
+def train_and_build_scalers(X, y, feature_cols):
+    """
+    X shape: (n_samples, lookback, n_features)
+    y shape: (n_samples, pred_steps)
+    """
+    n_samples, lookback, n_features = X.shape
+    # X scaler - fit on flattened 2D (n_samples*lookback, n_features)
+    scaler_x = MinMaxScaler()
+    scaler_x.fit(X.reshape(-1, n_features))
+    scaler_x.feature_names = feature_cols[:]  # store features used (order)
+    # y scaler - fit on (n_samples, pred_steps)
+    scaler_y = MinMaxScaler()
+    scaler_y.fit(y)
+    return scaler_x, scaler_y
+
+def scale_X_with_scalerX(X_raw, scaler_x):
+    # X_raw: either (n_samples, lookback, n_features) or (lookback, n_features)
+    orig_shape = X_raw.shape
+    if X_raw.ndim == 3:
+        n_samples, lookback, n_features = X_raw.shape
+        flat = X_raw.reshape(-1, n_features)
+        scaled = scaler_x.transform(flat).reshape(n_samples, lookback, n_features)
+        return scaled
+    elif X_raw.ndim == 2:
+        flat = X_raw
+        scaled = scaler_x.transform(flat).reshape(1, orig_shape[0], orig_shape[1])
+        return scaled
+    else:
+        raise ValueError("Unsupported X_raw ndim")
+
 # ---------------- 主流程 ----------------
 if __name__ == "__main__":
+    # ---------------- user params ----------------
     TICKER = "2301.TW"
     LOOKBACK = 60
     PRED_STEPS = 10
     PERIOD = "36mo"
     TEST_RATIO = 0.15
 
-    # 1) 取得資料並計指標
-    df = fetch_and_prepare(ticker=TICKER, period=PERIOD)
-    df = update_today_from_firestore(df)  # optional update
-    save_stock_data_to_firestore(df, ticker=TICKER)  # optional write historical
-
-    # choose a compact set of features (含 price 作為一欄)
+    # features you provided
     feature_cols = [
         'Close','Volume','ret_lag_1','ret_lag_2','ret_lag_3',
         'EMA_5','EMA_10','EMA_20','EMA_50','MACD_hist',
         'RSI_14','StochRSI','ATR_14','BB_width','OBV','OBV_SMA_20',
         'vol_5','vol_10','day_of_week','is_month_end'
     ]
-    # ensure all exist
-    feature_cols = [c for c in feature_cols if c in df.columns]
 
-    X, y, used_features = build_multi_step_returns(df[feature_cols + ['Close']], close_col='Close', pred_steps=PRED_STEPS, lookback=LOOKBACK, feature_cols=feature_cols)
+    # ---------------- 1) fetch & prepare data ----------------
+    df = fetch_and_prepare(ticker=TICKER, period=PERIOD)
+    df = update_today_from_firestore(df)  # optional
+
+    # ensure features exist / aligned for training
+    df_aligned = align_features_for_training_and_prediction(df, feature_cols + ['Close'])
+
+    # Save historical (optional)
+    save_stock_data_to_firestore(df, ticker=TICKER)
+
+    # ---------------- 2) build dataset (X, y) using feature_cols (must include 'Close') ----------------
+    # We'll pass df_aligned[feature_cols + ['Close']] but build_multi_step_returns expects df with 'Close'
+    df_for_builder = df_aligned.copy()
+    if 'Close' not in df_for_builder.columns:
+        # ensure Close present
+        df_for_builder['Close'] = df['Close']
+    # Use feature_cols for features (they already include 'Close' per your list)
+    X, y = build_multi_step_returns(df_for_builder[feature_cols + ['Close']], close_col='Close', pred_steps=PRED_STEPS, lookback=LOOKBACK)
+
     print("X shape:", X.shape, "y shape:", y.shape)
 
-    # 2) time series split
+    # ---------------- 3) train/test split ----------------
     X_train, X_test, y_train, y_test = time_series_split(X, y, test_ratio=TEST_RATIO)
 
-    # 3) scaling
-    nsamples, tw, nfeatures = X_train.shape
-    scaler_x = MinMaxScaler()
-    scaler_x.fit(X_train.reshape((-1, nfeatures)))
-    def scale_X(X_raw):
-        s = X_raw.reshape((-1, X_raw.shape[-1]))
-        return scaler_x.transform(s).reshape(X_raw.shape)
-    X_train_s = scale_X(X_train)
-    X_test_s = scale_X(X_test)
-
-    # scale y (returns) per column using MinMaxScaler on flattened 2D (n_samples x steps)
-    scaler_y = MinMaxScaler()
-    scaler_y.fit(y_train)  # shape (n_samples, pred_steps)
+    # ---------------- 4) build scalers and scale ----------------
+    scaler_x, scaler_y = train_and_build_scalers(X_train, y_train, feature_cols)
+    X_train_s = scale_X_with_scalerX(X_train, scaler_x)
+    X_test_s = scale_X_with_scalerX(X_test, scaler_x)
     y_train_s = scaler_y.transform(y_train)
     y_test_s = scaler_y.transform(y_test)
 
-    # 4) build & train TCN
-    model = build_tcn_multi_step((LOOKBACK, nfeatures), output_steps=PRED_STEPS)
+    # ---------------- 5) build & train model ----------------
+    n_features = len(feature_cols)
+    model = build_tcn_multi_step((LOOKBACK, n_features), output_steps=PRED_STEPS)
     model.summary()
     os.makedirs("models", exist_ok=True)
     ckpt_path = f"models/{TICKER}_tcn_best.h5"
     es = EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1)
     mc = ModelCheckpoint(ckpt_path, monitor='val_loss', save_best_only=True, verbose=1)
+
     history = model.fit(X_train_s, y_train_s, validation_data=(X_test_s, y_test_s),
                         epochs=60, batch_size=32, callbacks=[es, mc], verbose=2)
 
-    # 5) predict and inverse scale
+    # ---------------- 6) predict on test set and evaluate (returns) ----------------
     pred_s = model.predict(X_test_s)
-    pred = scaler_y.inverse_transform(pred_s)  # returns in decimal (e.g., 0.01 == 1%)
+    pred = scaler_y.inverse_transform(pred_s)  # predicted returns
 
-    # compute metrics on returns (MAE / RMSE per step)
     maes_model, rmses_model = compute_metrics(y_test, pred)
     print("Per-step MAE (model returns):", np.round(maes_model, 6))
     print("Avg MAE (model returns):", np.round(maes_model.mean(), 6))
 
-    # Baselines (last-close repeated -> convert to returns baseline relative to last_close)
-    last_known_closes_all = X_test[:, -1, feature_cols.index('Close')] if 'Close' in feature_cols else X_test[:, -1, 0]
-    # Baseline A: assume returns 0 (flat) -> predicted returns all zeros
+    # Baselines (returns)
+    # Baseline A: zeros (flat)
     baselineA = np.zeros_like(pred)
-    # Baseline B: repeat last 1-day return
-    if 'ret_lag_1' in feature_cols:
-        last_ret_1 = X_test[:, -1, feature_cols.index('ret_lag_1')]
+    # Baseline B: repeat last day's ret_lag_1 from X_test raw
+    idx_ret_lag_1 = feature_cols.index('ret_lag_1') if 'ret_lag_1' in feature_cols else None
+    if idx_ret_lag_1 is not None:
+        last_ret_1 = X_test[:, -1, idx_ret_lag_1]
         baselineB = np.zeros_like(pred)
         for i in range(baselineB.shape[0]):
             r = last_ret_1[i]
-            price = last_known_closes_all[i]
-            # build returns sequence by repeating r (geometric compounding)
-            for t in range(baselineB.shape[1]):
-                baselineB[i, t] = r
+            baselineB[i, :] = r  # repeating same return (approx)
     else:
         baselineB = baselineA.copy()
 
     maes_bA, rmses_bA = compute_metrics(y_test, baselineA)
     maes_bB, rmses_bB = compute_metrics(y_test, baselineB)
-
     print("Avg MAE model returns:", np.round(maes_model.mean(),6),
           "baselineA:", np.round(maes_bA.mean(),6), "baselineB:", np.round(maes_bB.mean(),6))
 
-    # 6) evaluate derived price MA errors: convert predictions -> closes and compare MA
-    # build last_closes_window for each test sample (we need real last LOOKBACK closes)
-    # Note: X_test contains scaled features; we need last raw closes from unscaled X_test slice: take from original X using index
-    # We'll reconstruct last_closes from X_test (unscaled) using original X slices.
+    # ---------------- 7) evaluate derived closes and MA metrics ----------------
+    # reconstruct last closes window from X_test raw (these X_test are unscaled original before training)
+    # Note: our X was built from df_features.values so they correspond to original scale
     last_closes_window = X_test[:, -LOOKBACK:, feature_cols.index('Close')] if 'Close' in feature_cols else X_test[:, -LOOKBACK:, 0]
-    # For correct conversion we need the last observed actual close for each sample (the final element of last_closes_window)
-    # But last_closes_window currently is unscaled (since X_test is original before scaling) — correct.
-    # Convert model returns to future closes for each sample
     n_test = pred.shape[0]
     model_closes = np.zeros_like(pred)
     baselineA_closes = np.zeros_like(pred)
@@ -448,27 +510,26 @@ if __name__ == "__main__":
     true_closes = np.zeros_like(pred)
     for i in range(n_test):
         last_close = last_closes_window[i, -1]
-        # true future closes (from y_test: returns) -> convert cumulative
+        # true closes
         true_returns = y_test[i]
-        # compute true closes
         tc = []
         c = float(last_close)
         for r in true_returns:
             c = c * (1 + float(r))
             tc.append(c)
         true_closes[i, :] = tc
-        # model predicted returns
+        # model closes
         mr = pred[i]
         mc = returns_to_future_close(last_close, mr)
         model_closes[i, :] = mc
-        # baselineA: returns = 0 -> flat price equal to last_close
+        # baselineA closes (flat)
         baselineA_closes[i, :] = [last_close for _ in range(pred.shape[1])]
-        # baselineB: use baselineB returns if available -> convert
+        # baselineB closes
         br = baselineB[i]
         bc = returns_to_future_close(last_close, br)
         baselineB_closes[i, :] = bc
 
-    # compute MAE of MA5 / MA10 of derived series
+    # derived MA errors
     model_MA5 = compute_ma_from_predictions(last_closes_window, model_closes, ma_period=5)
     model_MA10 = compute_ma_from_predictions(last_closes_window, model_closes, ma_period=10)
     bA_MA5 = compute_ma_from_predictions(last_closes_window, baselineA_closes, ma_period=5)
@@ -484,17 +545,17 @@ if __name__ == "__main__":
     print("MAE on derived MA5 -> model:", np.round(mae_model_MA5,4), "baselineA:", np.round(mae_bA_MA5,4))
     print("MAE on derived MA10 -> model:", np.round(mae_model_MA10,4), "baselineA:", np.round(mae_bA_MA10,4))
 
-    # 7) generate final df_future for plotting using last window of full df
-    # Use model trained on all (optionally you can retrain on full dataset)
-    # We'll use the model and last LOOKBACK rows in df
-    X_last_raw = df[feature_cols].tail(LOOKBACK).values.reshape(1, LOOKBACK, len(feature_cols))
-    X_last_s = scale_X(X_last_raw)
+    # ---------------- 8) predict on last window (for production) and build df_future ----------------
+    # Align df with scaler_x.feature_names and take last LOOKBACK rows
+    df_features_for_pred = align_features_for_training_and_prediction(df, scaler_x.feature_names)
+    X_last_raw = df_features_for_pred.tail(LOOKBACK).values  # shape (LOOKBACK, n_features)
+    X_last_s = scale_X_with_scalerX(X_last_raw, scaler_x)  # returns shape (1, LOOKBACK, n_features)
     pred_last_s = model.predict(X_last_s)[0]
-    pred_last_returns = scaler_y.inverse_transform(pred_last_s.reshape(1, -1))[0] if pred_last_s.ndim==1 else scaler_y.inverse_transform(pred_last_s)[0]
+    pred_last_returns = scaler_y.inverse_transform(pred_last_s.reshape(1, -1))[0] if hasattr(scaler_y, 'inverse_transform') else pred_last_s
     last_close_real = df['Close'].iloc[-1]
     pred_last_closes = returns_to_future_close(last_close_real, pred_last_returns)
 
-    # compute MA5/MA10 starting from last known closes (use last 10 real closes)
+    # compute MA5/MA10 from last known closes
     last_known_closes = df['Close'].values[-10:].tolist()
     results = []
     seq = list(last_known_closes)
@@ -513,12 +574,12 @@ if __name__ == "__main__":
         "Pred_MA10": [r[2] for r in results]
     })
 
-    # 8) plot & upload
+    # ---------------- 9) plot & upload ----------------
     image_url = plot_and_upload_to_storage(df, df_future, bucket_obj=bucket)
     print("Image URL:", image_url)
     print(df_future)
 
-    # 9) write predictions to Firestore (if enabled)
+    # ---------------- 10) write predictions to Firestore (if enabled) ----------------
     if db is not None:
         for i, row in df_future.iterrows():
             try:
