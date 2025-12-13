@@ -5,7 +5,8 @@ FireBase.py
 - 技術指標即時計算
 - 假日補今天
 - LSTM multi-step
-- 畫圖輸出 results + 上傳 Storage
+- 畫圖輸出 results
+- 不上傳 Storage（避免付費問題）
 """
 
 import os, math, json
@@ -25,36 +26,31 @@ from tensorflow.keras.callbacks import EarlyStopping
 # Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
-from google.cloud import storage
 
 # ================= Firebase 初始化 =================
 key_dict = json.loads(os.environ.get("FIREBASE", "{}"))
-db, bucket = None, None
+db = None
 
 if key_dict:
     cred = credentials.Certificate(key_dict)
     try:
         firebase_admin.get_app()
     except Exception:
-        firebase_admin.initialize_app(
-            cred, {"storageBucket": f"{key_dict.get('project_id')}.appspot.com"}
-        )
+        firebase_admin.initialize_app(cred)
     db = firestore.client()
-    try:
-        storage_client = storage.Client.from_service_account_info(key_dict)
-        bucket = storage_client.bucket(f"{key_dict.get('project_id')}.appspot.com")
-    except Exception:
-        bucket = None
 
 # ================= Firestore 讀取 =================
 def load_df_from_firestore(ticker, collection="NEW_stock_data_liteon", days=400):
     rows = []
-    for doc in db.collection(collection).stream():
-        p = doc.to_dict().get(ticker)
-        if p:
-            rows.append({"date": doc.id, **p})
+    if db:
+        for doc in db.collection(collection).stream():
+            p = doc.to_dict().get(ticker)
+            if p:
+                rows.append({"date": doc.id, **p})
 
     df = pd.DataFrame(rows)
+    if df.empty:
+        raise ValueError("⚠️ Firestore 無資料")
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").tail(days).set_index("date")
     return df
@@ -119,9 +115,11 @@ def build_lstm(input_shape, steps):
     m.compile(optimizer="adam", loss="mae")
     return m
 
-# ================= 畫圖 + 上傳 =================
-def plot_and_save(df_hist, future_df, bucket_obj=None):
+# ================= 畫圖 =================
+def plot_and_save(df_hist, future_df):
     hist = df_hist.tail(10)
+    if hist.empty:
+        hist = df_hist.tail(1)  # 至少取一筆
 
     plt.figure(figsize=(16,8))
     plt.plot(hist.index, hist["Close"], label="Close")
@@ -149,17 +147,7 @@ def plot_and_save(df_hist, future_df, bucket_obj=None):
     plt.close()
 
     print(f"📈 圖片已輸出：{fpath}")
-
-    if bucket_obj:
-        blob = bucket_obj.blob(f"LSTM_Pred_Images/{fname}")
-        blob.upload_from_filename(fpath)
-        try:
-            blob.make_public()
-            print("🌐 公開 URL:", blob.public_url)
-            return blob.public_url
-        except Exception:
-            return None
-    return None
+    return fpath
 
 # ================= Main =================
 if __name__ == "__main__":
@@ -214,4 +202,4 @@ if __name__ == "__main__":
     future_df = pd.DataFrame(future)
     future_df["date"] = pd.bdate_range(start=start, periods=STEPS)
 
-    plot_and_save(df, future_df, bucket)
+    plot_and_save(df, future_df)
