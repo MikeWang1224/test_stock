@@ -140,6 +140,18 @@ def plot_and_save(df_hist, future_df):
         "r:o", label="Pred Close"
     )
 
+    # 🔴 NEW：預測關盤價數字標註
+    for i, price in enumerate(future_df["Pred_Close"]):
+        ax.text(
+            x_future[i],
+            price + 0.3,                 # 微微往上，避免壓到點
+            f"{price:.2f}",
+            color="red",
+            fontsize=9,
+            ha="center",
+            va="bottom"
+        )
+
     # 預測 MA
     ax.plot(
         np.concatenate([[x_hist[-1]], x_future]),
@@ -153,7 +165,7 @@ def plot_and_save(df_hist, future_df):
         "b--o", label="Pred MA10"
     )
 
-    # ✅ 關鍵：一天一格（強制）
+    # 一天一格（交易日）
     ax.set_xticks(np.arange(len(all_dates)))
     ax.set_xticklabels(all_dates, rotation=45, ha="right")
 
@@ -164,7 +176,6 @@ def plot_and_save(df_hist, future_df):
     fname = f"{datetime.now().strftime('%Y-%m-%d')}_pred.png"
     plt.savefig(os.path.join("results", fname), dpi=300, bbox_inches="tight")
     plt.close()
-
 
 # ================= Main =================
 if __name__ == "__main__":
@@ -209,7 +220,7 @@ if __name__ == "__main__":
 
     preds = sy.inverse_transform(model.predict(X_te_s))
 
-    # ====== 🔑 正確的 MA 預測（假日安全） ======
+    # ====== MA 預測（假日安全） ======
     today = pd.Timestamp(datetime.now().date())
     last_real_trade_date = df.index[df.index < today][-1]
     last_real_closes = df.loc[:last_real_trade_date, "Close"].iloc[-10:].tolist()
