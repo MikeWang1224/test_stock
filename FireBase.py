@@ -262,7 +262,7 @@ if __name__ == "__main__":
 
     future_df = pd.DataFrame(future)
     future_df["date"] = pd.bdate_range(
-        start=df.index.max() + BDay(1)
+        start=df.index.max() + BDay(1),
         periods=STEPS
     )
 
