@@ -9,6 +9,10 @@ FireBase_Attention_LSTM_Direction.py
   3) ✅ Return head 加 tanh 限幅（避免預測爆炸）
   4) ✅ Volume 做 log1p（小資料更穩）
 - 圖表輸出完全不變（保留 Today 標記）
+
+✅ 改1：修正 scaler fit / split 座標系，避免資料洩漏（leakage）
+  - create_sequences 回傳每個樣本對應的日期 idx
+  - split 用樣本數切，scaler.fit 只用 train 區間的 df 特徵
 """
 
 import os, json
@@ -86,8 +90,9 @@ def create_sequences(df, features, steps=5, window=40):
     X: t-window ~ t-1
     y_ret: t ~ t+steps-1 的 log return
     y_dir: 未來 steps 天累積方向
+    idx: 每個樣本對應的「t 當天日期」（用來避免 scaler/split 座標系錯位）
     """
-    X, y_ret, y_dir = [], [], []
+    X, y_ret, y_dir, idx = [], [], [], []
 
     close = df["Close"].astype(float)
     logret = np.log(close).diff()
@@ -101,8 +106,9 @@ def create_sequences(df, features, steps=5, window=40):
         X.append(x_seq)
         y_ret.append(future_ret)
         y_dir.append(1.0 if future_ret.sum() > 0 else 0.0)
+        idx.append(df.index[i])  # ✅ 這個樣本對應的 t 日期
 
-    return np.array(X), np.array(y_ret), np.array(y_dir)
+    return np.array(X), np.array(y_ret), np.array(y_dir), np.array(idx)
 
 # ================= Attention-LSTM（✅ return 限幅） =================
 def build_attention_lstm(input_shape, steps, max_daily_logret=0.06):
@@ -252,20 +258,30 @@ if __name__ == "__main__":
 
     df = df.dropna()
 
-    X, y_ret, y_dir = create_sequences(df, FEATURES, steps=STEPS, window=LOOKBACK)
+    # ✅ 改1：create_sequences 回傳 idx（樣本對應日期）
+    X, y_ret, y_dir, idx = create_sequences(df, FEATURES, steps=STEPS, window=LOOKBACK)
     print(f"df rows: {len(df)} | X samples: {len(X)}")
 
     if len(X) < 40:
         raise ValueError("⚠️ 可用序列太少（<40）。建議：降低 LOOKBACK/STEPS 或檢查資料是否缺欄位/過多 NaN。")
 
+    # ✅ split 用樣本數切（不再拿去推 df 的 iloc）
     split = int(len(X) * 0.85)
 
     X_tr, X_te = X[:split], X[split:]
     y_ret_tr, y_ret_te = y_ret[:split], y_ret[split:]
     y_dir_tr, y_dir_te = y_dir[:split], y_dir[split:]
+    idx_tr, idx_te = idx[:split], idx[split:]
+
+    # ✅ 改1：scaler.fit 僅用 train 區間（用 idx_tr 的最後日期界定）
+    train_end_date = pd.Timestamp(idx_tr[-1])
+    df_for_scaler = df.loc[:train_end_date, FEATURES].copy()
+
+    if len(df_for_scaler) < LOOKBACK + 5:
+        raise ValueError("⚠️ train 區間太短，無法穩定 fit scaler。請確認資料量或調整 LOOKBACK。")
 
     sx = MinMaxScaler()
-    sx.fit(df[FEATURES].iloc[:min(split + LOOKBACK, len(df))])
+    sx.fit(df_for_scaler.values)
 
     def scale_X(Xb):
         n, t, f = Xb.shape
