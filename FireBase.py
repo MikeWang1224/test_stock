@@ -14,10 +14,11 @@ import matplotlib.pyplot as plt
 from pandas.tseries.offsets import BDay
 
 from sklearn.preprocessing import MinMaxScaler
+import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
     Input, LSTM, Dense, Dropout,
-    Attention, GlobalAveragePooling1D
+    Softmax, Lambda
 )
 from tensorflow.keras.callbacks import EarlyStopping
 
@@ -80,15 +81,22 @@ def create_sequences(df, features, steps=10, window=60):
 
     return np.array(X), np.array(y_ret), np.array(y_dir)
 
-# ================= Attention-LSTM + Direction =================
+# ================= Attention Pooling（改A：可學習的時間步加權和） =================
 def build_attention_lstm(input_shape, steps):
     inp = Input(shape=input_shape)
 
     x = LSTM(64, return_sequences=True)(inp)
     x = Dropout(0.1)(x)
 
-    attn = Attention()([x, x])
-    context = GlobalAveragePooling1D()(attn)
+    # ---- 改A重點：Learnable Attention Pooling ----
+    # score: (batch, time, 1)
+    score = Dense(1, name="attn_score")(x)
+    # weights: (batch, time, 1)  (softmax over time axis)
+    weights = Softmax(axis=1, name="attn_weights")(score)
+    # context: (batch, hidden)
+    context = Lambda(lambda t: tf.reduce_sum(t[0] * t[1], axis=1),
+                     name="attn_context")([x, weights])
+    # --------------------------------------------
 
     # Head 1: return
     out_ret = Dense(steps, name="return")(context)
@@ -164,7 +172,7 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
     X_last = X_te_s[-1:]
     y_true = y_te[-1]
 
-    pred_ret, _ = model.predict(X_last)
+    pred_ret, _ = model.predict(X_last, verbose=0)
     pred_ret = pred_ret[0]
 
     dates = df.index[-steps:]
@@ -246,7 +254,7 @@ if __name__ == "__main__":
         callbacks=[EarlyStopping(patience=6, restore_best_weights=True)]
     )
 
-    pred_ret, pred_dir = model.predict(X_te_s)
+    pred_ret, pred_dir = model.predict(X_te_s, verbose=0)
     raw_returns = pred_ret[-1]
 
     print(f"📈 預測方向機率（看漲）: {pred_dir[-1][0]:.2%}")
