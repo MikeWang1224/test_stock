@@ -238,18 +238,7 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
     mae = np.mean(np.abs(true_prices - pred_prices))
     rmse = np.sqrt(np.mean((true_prices - pred_prices) ** 2))
 
-    # ✅ 回測數值輸出 CSV
-    bt_df = pd.DataFrame({
-        "date": pd.to_datetime(dates),
-        "Actual_Close": true_prices,
-        "Pred_Close": pred_prices,
-        "AbsError": np.abs(true_prices - pred_prices),
-    })
-    os.makedirs("results", exist_ok=True)
-    bt_df.to_csv(f"results/{datetime.now():%Y-%m-%d}_backtest.csv",
-                 index=False, encoding="utf-8-sig")
-
-    # 回測圖 PNG（保持原風格）
+    # ✅ 僅輸出回測圖，不生 CSV
     plt.figure(figsize=(12,6))
     plt.plot(dates, true_prices, label="Actual Close")
     plt.plot(dates, pred_prices, "--o", label="Pred Close")
@@ -258,6 +247,7 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
     plt.legend()
     plt.grid(True)
 
+    os.makedirs("results", exist_ok=True)
     plt.savefig(
         f"results/{datetime.now():%Y-%m-%d}_backtest.png",
         dpi=300,
