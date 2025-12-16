@@ -213,76 +213,57 @@ def plot_and_save(df_hist, future_df):
     plt.close()
 
 # ================= 回測誤差圖（PNG + CSV） =================
-# ================= 昨日預測 vs 今日實際 回測圖 =================
-def plot_yesterday_forecast_vs_today(df):
-    """
-    使用「昨天產生的 forecast CSV」
-    對照今天實際 Close
-    ❌ 不重新預測
-    ❌ 不包含今天之後的預測
-    """
+def plot_backtest_error(df, X_te_s, y_te, model, steps):
+    X_last = X_te_s[-1:]
+    y_true = y_te[-1]
 
-    today = pd.Timestamp(datetime.now().date())
-    yesterday = today - BDay(1)
+    pred_ret, _ = model.predict(X_last, verbose=0)
+    pred_ret = pred_ret[0]
 
-    forecast_file = f"results/{yesterday:%Y-%m-%d}_forecast.csv"
-    output_png = f"results/{today:%Y-%m-%d}_backtest.png"
+    dates = df.index[-steps:]
+    start_price = df.loc[dates[0] - BDay(1), "Close"]
 
-    if not os.path.exists(forecast_file):
-        print(f"⚠️ 找不到昨日預測檔：{forecast_file}")
-        return
+    true_prices, pred_prices = [], []
+    p_true = p_pred = start_price
 
-    # 昨天的預測
-    fc = pd.read_csv(forecast_file, parse_dates=["date"])
+    for r_t, r_p in zip(y_true, pred_ret):
+        p_true *= np.exp(r_t)
+        p_pred *= np.exp(r_p)
+        true_prices.append(p_true)
+        pred_prices.append(p_pred)
 
-    # 今天實際收盤
-    if today not in df.index:
-        print("⚠️ 今日尚無實際收盤價，略過回測圖")
-        return
+    true_prices = np.array(true_prices, dtype=float)
+    pred_prices = np.array(pred_prices, dtype=float)
 
-    today_close = float(df.loc[today, "Close"])
+    mae = np.mean(np.abs(true_prices - pred_prices))
+    rmse = np.sqrt(np.mean((true_prices - pred_prices) ** 2))
 
-    # 只取「預測序列中的最後一天」來對齊今天
-    last_pred_date = fc["date"].iloc[-1]
-    last_pred_price = fc["Pred_Close"].iloc[-1]
+    # ✅ 回測數值輸出 CSV
+    bt_df = pd.DataFrame({
+        "date": pd.to_datetime(dates),
+        "Actual_Close": true_prices,
+        "Pred_Close": pred_prices,
+        "AbsError": np.abs(true_prices - pred_prices),
+    })
+    os.makedirs("results", exist_ok=True)
+    bt_df.to_csv(f"results/{datetime.now():%Y-%m-%d}_backtest.csv",
+                 index=False, encoding="utf-8-sig")
 
-    # ===== 畫圖 =====
+    # 回測圖 PNG（保持原風格）
     plt.figure(figsize=(12,6))
-
-    plt.plot(
-        fc["date"],
-        fc["Pred_Close"],
-        "--o",
-        label="Yesterday Forecast"
-    )
-
-    plt.scatter(
-        [last_pred_date],
-        [today_close],
-        s=120,
-        marker="*",
-        label="Today Actual Close"
-    )
-
-    plt.text(
-        last_pred_date,
-        today_close + 0.3,
-        f"{today_close:.2f}",
-        ha="center",
-        fontsize=10
-    )
-
-    plt.title("Backtest: Yesterday Forecast vs Today Actual")
+    plt.plot(dates, true_prices, label="Actual Close")
+    plt.plot(dates, pred_prices, "--o", label="Pred Close")
+    plt.title(f"Backtest | MAE={mae:.2f}, RMSE={rmse:.2f}")
     plt.xticks(rotation=45)
     plt.legend()
     plt.grid(True)
 
-    os.makedirs("results", exist_ok=True)
-    plt.savefig(output_png, dpi=300, bbox_inches="tight")
+    plt.savefig(
+        f"results/{datetime.now():%Y-%m-%d}_backtest.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
     plt.close()
-
-    print(f"✅ 回測圖已輸出：{output_png}")
-
 
 # ================= Main =================
 if __name__ == "__main__":
@@ -379,4 +360,4 @@ if __name__ == "__main__":
                      index=False, encoding="utf-8-sig")
 
     plot_and_save(df, future_df)
-    plot_yesterday_forecast_vs_today(df)
+    plot_backtest_error(df, X_te_s, y_ret_te, model, STEPS)
