@@ -178,7 +178,7 @@ def plot_and_save(df_hist, future_df):
     today_y = float(hist["Close"].iloc[-1])
     ax.scatter([today_x], [today_y], marker="*", s=160, label="Today Close")
     ax.text(today_x, today_y + 0.3, f"Today {today_y:.2f}",
-            fontsize=20, ha="center")
+            fontsize=18, ha="center")
 
     ax.plot(
         np.concatenate([[x_hist[-1]], x_future]),
@@ -188,7 +188,7 @@ def plot_and_save(df_hist, future_df):
 
     for i, price in enumerate(future_df["Pred_Close"]):
         ax.text(x_future[i], price + 0.3, f"{price:.2f}",
-                color="red", fontsize=20, ha="center")
+                color="red", fontsize=18, ha="center")
 
     ax.plot(
         np.concatenate([[x_hist[-1]], x_future]),
@@ -203,7 +203,7 @@ def plot_and_save(df_hist, future_df):
     )
 
     ax.set_xticks(np.arange(len(all_dates)))
-    ax.set_xticklabels(all_dates, rotation=45, ha="right", fontsize=18)
+    ax.set_xticklabels(all_dates, rotation=45, ha="right", fontsize=15)
     ax.legend()
     ax.set_title("2301.TW Attention-LSTM 預測")
 
