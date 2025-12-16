@@ -22,48 +22,41 @@
     .hint {
       font-size: 14px;
       color: #aaa;
-      margin-bottom: 8px;
+      margin-bottom: 16px;
     }
 
-    /* 圖片容器 */
-    .img-wrapper {
-      position: relative;
+    /* 圖片區塊 */
+    .section {
       max-width: 900px;
-      margin: 0 auto 24px auto;
+      margin: 0 auto 32px auto;
       display: none;
     }
 
-    .img-wrapper img {
+    /* 圖片上方的大字 */
+    .section-title {
+      font-size: 26px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      line-height: 1.4;
+    }
+
+    /* 第二段再更大 */
+    .section-title.big {
+      font-size: 32px;
+    }
+
+    img {
       width: 100%;
       border-radius: 6px;
       display: block;
     }
 
-    /* 圖片上方大標題 */
-    .img-title {
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      padding: 14px 12px;
-      font-size: 22px;
-      font-weight: 700;
-      background: rgba(0, 0, 0, 0.65);
-      text-align: center;
-      line-height: 1.4;
-    }
-
-    /* 第二張再更大一點 */
-    .img-title.big {
-      font-size: 26px;
-    }
-
     @media (min-width: 768px) {
-      .img-title {
-        font-size: 26px;
-      }
-      .img-title.big {
+      .section-title {
         font-size: 32px;
+      }
+      .section-title.big {
+        font-size: 40px;
       }
     }
   </style>
@@ -73,17 +66,17 @@
   <h1 id="title">載入中…</h1>
   <div class="hint" id="hint"></div>
 
-  <!-- 第一張：預測 -->
-  <div class="img-wrapper" id="predWrapper">
-    <div class="img-title">
+  <!-- 第一張 -->
+  <div class="section" id="predSection">
+    <div class="section-title">
       明天預測收盤價、五日線（綠線）、十日線（藍線）
     </div>
     <img id="predImg" alt="Prediction">
   </div>
 
-  <!-- 第二張：回推 -->
-  <div class="img-wrapper" id="backtestWrapper">
-    <div class="img-title big">
+  <!-- 第二張 -->
+  <div class="section" id="backtestSection">
+    <div class="section-title big">
       結果回推（預測準不準）
     </div>
     <img id="backtestImg" alt="Backtest">
@@ -135,12 +128,10 @@
           document.getElementById("predImg").src = pred;
           document.getElementById("backtestImg").src = backtest;
 
-          document.getElementById("predWrapper").style.display = "block";
-          document.getElementById("backtestWrapper").style.display = "block";
+          document.getElementById("predSection").style.display = "block";
+          document.getElementById("backtestSection").style.display = "block";
           return;
-        } catch (e) {
-          // 繼續往前找
-        }
+        } catch (e) {}
       }
 
       document.getElementById("title").innerText = "找不到可用圖表";
