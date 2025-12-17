@@ -177,7 +177,7 @@ def plot_and_save(df_hist, future_df):
     today_x = x_hist[-1]
     today_y = float(hist["Close"].iloc[-1])
     ax.scatter([today_x], [today_y], marker="*", s=160, label="Today Close")
-    ax.text(today_x, today_y + 0.3, f"Today {today_y:.2f}",
+    ax.text(today_x, today_y + 0.3, f"Today {today_y:.f}",
             fontsize=17, ha="center")
 
     ax.plot(
@@ -187,7 +187,7 @@ def plot_and_save(df_hist, future_df):
     )
 
     for i, price in enumerate(future_df["Pred_Close"]):
-        ax.text(x_future[i], price + 0.3, f"{price:.2f}",
+        ax.text(x_future[i], price + 0.3, f"{price:.f}",
                 color="red", fontsize=15, ha="center")
 
     ax.plot(
@@ -306,10 +306,10 @@ def plot_backtest_error(df):
     )
 
     # 標註
-    ax.text(x_t, close_t + 0.2, f"{close_t:.2f}", ha="center")
-    ax.text(x_t + 1, pred_t1 + 0.2, f"Pred\n{pred_t1:.2f}",
+    ax.text(x_t, close_t + 0.2, f"{close_t:.f}", ha="center")
+    ax.text(x_t + 1, pred_t1 + 0.2, f"Pred\n{pred_t1:.f}",
             color="red", ha="center")
-    ax.text(x_t + 1, actual_t1 - 0.4, f"Actual\n{actual_t1:.2f}",
+    ax.text(x_t + 1, actual_t1 - 0.4, f"Actual\n{actual_t1:.f}",
             color="green", ha="center")
 
     # X 軸
