@@ -52,12 +52,22 @@ jobs:
         run: |
           python FireBase.py
 
-      # ---------------- Commit 圖表結果 ----------------
-      - name: Commit & push result chart
+      # ---------------- 讓 HTML 一定更新（關鍵） ----------------
+      - name: Update build time in index.html
+        run: |
+          if grep -q "BUILD_TIME" index.html; then
+            sed -i "s|<!-- BUILD_TIME.*-->|<!-- BUILD_TIME $(date) -->|" index.html
+          else
+            echo "<!-- BUILD_TIME $(date) -->" >> index.html
+          fi
+
+      # ---------------- Commit 圖表 + HTML ----------------
+      - name: Commit & push results and html
         run: |
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
           git add results/*.png
           git add results/*.csv
-          git commit -m "Update Liteon stock chart" || echo "No changes to commit"
+          git add index.html
+          git commit -m "Update stock chart and refresh HTML" || echo "No changes to commit"
           git push
