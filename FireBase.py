@@ -245,7 +245,7 @@ def plot_backtest_error(df):
             continue
 
         # 必須是「不包含今日」的預測
-        if tmp["date"].max() < today:
+        if tmp["date"].iloc[0] < today:
             fc = tmp
             used_csv = fname
             break
