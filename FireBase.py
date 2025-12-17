@@ -213,106 +213,114 @@ def plot_and_save(df_hist, future_df):
     plt.close()
 
 # ================= 回測誤差圖（PNG + CSV） =================
+# -*- coding: utf-8 -*-
+"""
+FireBase_Attention_LSTM_Direction.py
+（中略：前面完全不動）
+"""
+
+# ================= 回測決策分岔圖（PNG + CSV） =================
 def plot_backtest_error(df):
     """
-    回測圖 = 昨日預測圖長相
-    差別只有：
-    - 昨天 forecast 的第一天 Pred_Close
-    - 改成 今日實際 Close
+    決策式回測圖（Decision-based Backtest）
+
+    - 前三天收盤價：趨勢背景
+    - 決策日 t
+    - 兩條線：
+        t → Pred(t+1)
+        t → Actual(t+1)
     """
 
     today = pd.Timestamp(datetime.now().date())
 
-    # ================= 找最近一份「不含今日」的 forecast =================
+    # ================= 找昨天的 forecast =================
     if not os.path.exists("results"):
-        print("⚠️ results 資料夾不存在，略過回測圖")
+        print("⚠️ 無 results 資料夾，略過回測")
         return
 
-    csv_files = sorted(
+    csvs = sorted(
         [f for f in os.listdir("results") if f.endswith("_forecast.csv")],
         reverse=True
     )
 
     forecast_csv = None
-    for f in csv_files:
+    for f in csvs:
         d = pd.to_datetime(f.split("_")[0])
         if d < today:
             forecast_csv = os.path.join("results", f)
             break
 
     if forecast_csv is None:
-        print("⚠️ 找不到任何『不包含今日』的 forecast CSV，略過回測圖")
+        print("⚠️ 找不到昨日 forecast，略過回測")
         return
 
-    # ================= 讀 forecast =================
     future_df = pd.read_csv(forecast_csv, parse_dates=["date"])
 
-    # ================= 今日實際 Close =================
-    if today in df.index:
-        actual_close = float(df.loc[today, "Close"])
+    # ================= 定義決策日 t =================
+    t = df.index.max() - BDay(1)
+
+    if t not in df.index:
+        print("⚠️ 決策日不存在，略過回測")
+        return
+
+    # ================= 價格 =================
+    close_t = float(df.loc[t, "Close"])
+    pred_t1 = float(future_df.loc[0, "Pred_Close"])
+
+    t1 = t + BDay(1)
+    if t1 in df.index:
+        actual_t1 = float(df.loc[t1, "Close"])
     else:
-        actual_close = float(df["Close"].iloc[-1])
+        actual_t1 = float(df["Close"].iloc[-1])
 
-    # 🔁 關鍵一行：用實際價覆蓋昨天預測的第一天
-    future_df.loc[0, "Pred_Close"] = actual_close
+    # ================= 趨勢背景（三天） =================
+    trend = df.loc[:t].tail(4)
+    x_trend = np.arange(len(trend))
 
-    # ================= 重新計算 MA（確保視覺一致） =================
-    seq = df["Close"].iloc[-10:].tolist()
-    for i in range(len(future_df)):
-        seq.append(future_df.loc[i, "Pred_Close"])
-        future_df.loc[i, "Pred_MA5"] = np.mean(seq[-5:])
-        future_df.loc[i, "Pred_MA10"] = np.mean(seq[-10:])
-
-    # ================= 畫圖：完全沿用原預測圖 =================
-    hist = df.tail(10)
-    hist_dates = hist.index.strftime("%m-%d").tolist()
-    future_dates = future_df["date"].dt.strftime("%m-%d").tolist()
-
-    all_dates = hist_dates + future_dates
-    x_hist = np.arange(len(hist_dates))
-    x_future = np.arange(len(hist_dates), len(all_dates))
-
-    plt.figure(figsize=(18, 8))
+    # ================= 畫圖 =================
+    plt.figure(figsize=(14, 6))
     ax = plt.gca()
 
-    ax.plot(x_hist, hist["Close"], label="Close")
-    ax.plot(x_hist, hist["SMA5"], label="SMA5")
-    ax.plot(x_hist, hist["SMA10"], label="SMA10")
+    # 趨勢線
+    ax.plot(x_trend, trend["Close"], "k-o", label="Recent Close")
 
-    # Today 點
-    today_x = x_hist[-1]
-    today_y = float(hist["Close"].iloc[-1])
-    ax.scatter([today_x], [today_y], marker="*", s=160, label="Today Close")
-    ax.text(today_x, today_y + 0.3, f"Today {today_y:.2f}",
-            fontsize=17, ha="center")
+    # 決策點 index
+    x_t = x_trend[-1]
 
-    # Pred Close（第一點已是真實）
+    # Pred 線
     ax.plot(
-        np.concatenate([[x_hist[-1]], x_future]),
-        [hist["Close"].iloc[-1]] + future_df["Pred_Close"].tolist(),
-        "r:o", label="Pred Close (Backtest)"
+        [x_t, x_t + 1],
+        [close_t, pred_t1],
+        "r--o",
+        linewidth=2.5,
+        label="Pred (t → t+1)"
     )
 
-    for i, price in enumerate(future_df["Pred_Close"]):
-        ax.text(x_future[i], price + 0.3, f"{price:.2f}",
-                color="red", fontsize=15, ha="center")
-
+    # Actual 線
     ax.plot(
-        np.concatenate([[x_hist[-1]], x_future]),
-        [hist["SMA5"].iloc[-1]] + future_df["Pred_MA5"].tolist(),
-        "g--o", label="Pred MA5"
+        [x_t, x_t + 1],
+        [close_t, actual_t1],
+        "g-o",
+        linewidth=2.5,
+        label="Actual (t → t+1)"
     )
 
-    ax.plot(
-        np.concatenate([[x_hist[-1]], x_future]),
-        [hist["SMA10"].iloc[-1]] + future_df["Pred_MA10"].tolist(),
-        "b--o", label="Pred MA10"
-    )
+    # 標註
+    ax.text(x_t, close_t + 0.2, f"{close_t:.2f}", ha="center")
+    ax.text(x_t + 1, pred_t1 + 0.2, f"Pred\n{pred_t1:.2f}",
+            color="red", ha="center")
+    ax.text(x_t + 1, actual_t1 - 0.4, f"Actual\n{actual_t1:.2f}",
+            color="green", ha="center")
 
-    ax.set_xticks(np.arange(len(all_dates)))
-    ax.set_xticklabels(all_dates, rotation=45, ha="right", fontsize=15)
+    # X 軸
+    labels = trend.index.strftime("%m-%d").tolist()
+    labels += ["t+1"]
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_xticklabels(labels)
+
+    ax.set_title("2301.TW Decision Backtest (t → t+1)")
     ax.legend()
-    ax.set_title("2301.TW Attention-LSTM 回測（昨日預測 vs 今日實際）")
+    ax.grid(alpha=0.3)
 
     os.makedirs("results", exist_ok=True)
     plt.savefig(
@@ -321,6 +329,22 @@ def plot_backtest_error(df):
         bbox_inches="tight"
     )
     plt.close()
+
+    # ================= CSV（單筆決策） =================
+    bt = pd.DataFrame([{
+        "decision_day": t.date(),
+        "close_t": close_t,
+        "pred_t1": pred_t1,
+        "actual_t1": actual_t1,
+        "direction_pred": np.sign(pred_t1 - close_t),
+        "direction_actual": np.sign(actual_t1 - close_t)
+    }])
+
+    bt.to_csv(
+        f"results/{datetime.now():%Y-%m-%d}_backtest.csv",
+        index=False,
+        encoding="utf-8-sig"
+    )
 
 
 # ================= Main =================
