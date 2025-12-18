@@ -319,7 +319,7 @@ def plot_backtest_error(df):
         f"{close_t:.2f}", 
         ha="center", 
         va="bottom",   
-        fontsize=14, 
+        fontsize=18, 
         color="black" 
     )
     # Pred t+1
@@ -329,7 +329,7 @@ def plot_backtest_error(df):
         f"Pred {pred_t1:.2f}",
         ha="left",
         va="center",
-        fontsize=14,
+        fontsize=16,
         color="red"
     )
     
@@ -340,7 +340,7 @@ def plot_backtest_error(df):
         f"Actual {actual_t1:.2f}",
         ha="left",
         va="center",
-        fontsize=14,
+        fontsize=16,
         color="green"
     )
     
