@@ -37,6 +37,10 @@ from tensorflow.keras.layers import (
 )
 from tensorflow.keras.callbacks import EarlyStopping
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
 # Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -357,13 +361,14 @@ def plot_backtest_error(df):
     # ================= Run timestamp =================
     ax.text(
         0.01, 0.01,
-        f"Generated at {datetime.now():%Y-%m-%d %H:%M:%S}",
+        f"Generated at {now_tw:%Y-%m-%d %H:%M:%S} (TW)",
         transform=ax.transAxes,
         fontsize=8,
         alpha=0.4,
         ha="left",
         va="bottom"
     )
+
 
 
     # ================= 儲存 =================
