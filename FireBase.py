@@ -5,7 +5,7 @@ FireBase_Attention_LSTM_Direction.py
 - Multi-task: Return path + Direction
 - ✅ 小資料友善版：更穩、更不容易亂噴
   1) LOOKBACK=40, STEPS=5
-  2) LSTM + Attention pooling（參數比 Transformer 更適合小資料）
+  2) LSTM + Attention pooling（參數比 Transformer 更適合小資料） 
   3) ✅ Return head 加 tanh 限幅（避免預測爆炸）
   4) ✅ Volume 做 log1p（小資料更穩）
 - 圖表輸出完全不變（保留 Today 標記）
