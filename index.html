@@ -25,14 +25,12 @@
       margin-bottom: 16px;
     }
 
-    /* 圖片區塊 */
     .section {
       max-width: 900px;
       margin: 0 auto 32px auto;
       display: none;
     }
 
-    /* 圖片上方的大字 */
     .section-title {
       font-size: 18px;
       font-weight: 700;
@@ -40,7 +38,6 @@
       line-height: 1.4;
     }
 
-    /* 第二段再更大 */
     .section-title.big {
       font-size: 20px;
     }
@@ -51,13 +48,32 @@
       display: block;
     }
 
+    /* 每支股票的容器 */
+    .stock-block {
+      max-width: 900px;
+      margin: 0 auto 42px auto;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255,255,255,0.12);
+    }
+
+    .stock-header {
+      margin: 10px 0 10px 0;
+      font-size: 18px;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    .stock-subhint {
+      font-size: 14px;
+      color: #aaa;
+      margin-bottom: 12px;
+    }
+
     @media (min-width: 768px) {
-      .section-title {
-        font-size: 32px;
-      }
-      .section-title.big {
-        font-size: 40px;
-      }
+      h1 { font-size: 28px; }
+      .section-title { font-size: 32px; }
+      .section-title.big { font-size: 40px; }
+      .stock-header { font-size: 26px; }
     }
   </style>
 </head>
@@ -66,28 +82,15 @@
   <h1 id="title">載入中…</h1>
   <div class="hint" id="hint"></div>
 
-  <!-- 第一張：預測 -->
-  <div class="section" id="predSection">
-    <div class="section-title" id="predTitle">
-      收盤價、五日線（綠線）、十日線（藍線）
-    </div>
-    <img id="predImg" alt="Prediction">
-  </div>
-
-  <!-- 第二張：回測 -->
-  <div class="section" id="backtestSection">
-    <div class="section-title big" id="backtestTitle">
-      結果回推（預測準不準）
-    </div>
-    <img id="backtestImg" alt="Backtest">
-  </div>
+  <!-- JS 會把每支股票的區塊塞進來 -->
+  <div id="container"></div>
 
   <script>
     const MAX_LOOKBACK_DAYS = 10;
     const IMG_FOLDER = "results";
 
-    // 你要顯示的股票（可加可減）
-    const TICKERS = [
+    // ✅ 兩支股票都要顯示（可自行增減）
+    const STOCKS = [
       { ticker: "2408.TW", name: "南亞科" },
       { ticker: "2301.TW", name: "光寶科" }
     ];
@@ -111,9 +114,8 @@
       });
     }
 
-    // 找最近日期：只要 pred 存在就算成功；backtest 有就加顯示
-    async function findLatestForTicker(tickerObj) {
-      const { ticker, name } = tickerObj;
+    async function findLatestForStock(stock) {
+      const { ticker } = stock;
 
       for (let i = 0; i <= MAX_LOOKBACK_DAYS; i++) {
         const d = new Date();
@@ -124,7 +126,7 @@
         const backtest = `${IMG_FOLDER}/${dateStr}_${ticker}_backtest.png`;
 
         const predOK = await loadImageIfExists(pred);
-        if (!predOK) continue; // pred 沒有就換前一天
+        if (!predOK) continue; // 沒 pred 就往前找
 
         const backtestOK = await loadImageIfExists(backtest);
 
@@ -133,52 +135,90 @@
           offsetDays: i,
           predSrc: pred,
           backtestSrc: backtest,
-          backtestOK,
-          ticker,
-          name
+          backtestOK
         };
       }
 
       return null;
     }
 
-    async function main() {
-      // 依序找：先南亞科，找不到再找光寶（你也可以反過來）
-      for (const t of TICKERS) {
-        const found = await findLatestForTicker(t);
-        if (!found) continue;
+    function createStockBlock(stock, found) {
+      const { name, ticker } = stock;
 
-        // 標題
-        document.getElementById("title").innerText =
-          `${found.name}（${found.ticker}）圖表日期：${found.dateStr}`;
-        document.getElementById("hint").innerText =
-          found.offsetDays === 0 ? "（今日）" : `（往前第 ${found.offsetDays} 天）`;
+      const block = document.createElement("div");
+      block.className = "stock-block";
 
-        // 預測：一定顯示
-        document.getElementById("predTitle").innerText =
-          `${found.name}｜收盤價、五日線（綠線）、十日線（藍線）`;
-        document.getElementById("predImg").src = found.predSrc;
-        document.getElementById("predSection").style.display = "block";
+      const header = document.createElement("div");
+      header.className = "stock-header";
+      header.textContent = `${name}（${ticker}）｜圖表日期：${found.dateStr}`;
+      block.appendChild(header);
 
-        // 回測：有就顯示，沒有就隱藏
-        if (found.backtestOK) {
-          document.getElementById("backtestTitle").innerText =
-            `${found.name}｜結果回推（預測準不準）`;
-          document.getElementById("backtestImg").src = found.backtestSrc;
-          document.getElementById("backtestSection").style.display = "block";
-        } else {
-          document.getElementById("backtestSection").style.display = "none";
-        }
+      const subhint = document.createElement("div");
+      subhint.className = "stock-subhint";
+      subhint.textContent = found.offsetDays === 0 ? "（今日）" : `（往前第 ${found.offsetDays} 天）`;
+      block.appendChild(subhint);
 
-        return; // 找到一組就結束
+      // --- Pred section (一定顯示) ---
+      const predSection = document.createElement("div");
+      predSection.className = "section";
+      predSection.style.display = "block";
+
+      const predTitle = document.createElement("div");
+      predTitle.className = "section-title";
+      predTitle.textContent = "收盤價、五日線（綠線）、十日線（藍線）";
+      predSection.appendChild(predTitle);
+
+      const predImg = document.createElement("img");
+      predImg.alt = `${ticker} Prediction`;
+      predImg.src = found.predSrc; // browser cache bust 已在 loadImageIfExists 做過，但這裡也可再加
+      predSection.appendChild(predImg);
+
+      block.appendChild(predSection);
+
+      // --- Backtest section (有才顯示) ---
+      if (found.backtestOK) {
+        const backtestSection = document.createElement("div");
+        backtestSection.className = "section";
+        backtestSection.style.display = "block";
+
+        const backtestTitle = document.createElement("div");
+        backtestTitle.className = "section-title big";
+        backtestTitle.textContent = "結果回推（預測準不準）";
+        backtestSection.appendChild(backtestTitle);
+
+        const backtestImg = document.createElement("img");
+        backtestImg.alt = `${ticker} Backtest`;
+        backtestImg.src = found.backtestSrc;
+        backtestSection.appendChild(backtestImg);
+
+        block.appendChild(backtestSection);
       }
 
-      // 都找不到（南亞科 + 光寶都沒有 pred）
-      document.getElementById("title").innerText = "找不到可用圖表";
-      document.getElementById("hint").innerText =
-        `最近 ${MAX_LOOKBACK_DAYS} 天內沒有任何「預測圖」`;
-      document.getElementById("predSection").style.display = "none";
-      document.getElementById("backtestSection").style.display = "none";
+      return block;
+    }
+
+    async function main() {
+      document.getElementById("title").innerText = "每日圖表";
+      document.getElementById("hint").innerText = "若某支股票缺回測圖，會只顯示預測圖（不會報錯）";
+
+      const container = document.getElementById("container");
+      container.innerHTML = "";
+
+      let shownCount = 0;
+
+      for (const stock of STOCKS) {
+        const found = await findLatestForStock(stock);
+        if (!found) continue; // 該股最近 N 天都沒 pred → 不顯示
+        const block = createStockBlock(stock, found);
+        container.appendChild(block);
+        shownCount += 1;
+      }
+
+      if (shownCount === 0) {
+        document.getElementById("title").innerText = "找不到可用圖表";
+        document.getElementById("hint").innerText =
+          `最近 ${MAX_LOOKBACK_DAYS} 天內沒有任何「預測圖」`;
+      }
     }
 
     main();
@@ -186,4 +226,4 @@
 
 </body>
 </html>
-<!-- BUILD_TIME Mon Dec 22 07:00:48 UTC 2025 -->
+<!-- BUILD_TIME Mon Dec 22 06:53:36 UTC 2025 -->
