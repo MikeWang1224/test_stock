@@ -25,12 +25,14 @@
       margin-bottom: 16px;
     }
 
+    /* 圖片區塊 */
     .section {
       max-width: 900px;
       margin: 0 auto 32px auto;
       display: none;
     }
 
+    /* 圖片上方的大字 */
     .section-title {
       font-size: 18px;
       font-weight: 700;
@@ -38,6 +40,7 @@
       line-height: 1.4;
     }
 
+    /* 第二段再更大 */
     .section-title.big {
       font-size: 20px;
     }
@@ -48,7 +51,7 @@
       display: block;
     }
 
-    /* 每支股票的容器 */
+    /* ✅ 多股票區塊樣式（新增） */
     .stock-block {
       max-width: 900px;
       margin: 0 auto 42px auto;
@@ -70,10 +73,15 @@
     }
 
     @media (min-width: 768px) {
-      h1 { font-size: 28px; }
-      .section-title { font-size: 32px; }
-      .section-title.big { font-size: 40px; }
-      .stock-header { font-size: 26px; }
+      .section-title {
+        font-size: 32px;
+      }
+      .section-title.big {
+        font-size: 40px;
+      }
+      .stock-header {
+        font-size: 26px;
+      }
     }
   </style>
 </head>
@@ -82,17 +90,20 @@
   <h1 id="title">載入中…</h1>
   <div class="hint" id="hint"></div>
 
-  <!-- JS 會把每支股票的區塊塞進來 -->
+  <!-- ✅ 多股票容器（新增） -->
   <div id="container"></div>
 
   <script>
     const MAX_LOOKBACK_DAYS = 10;
     const IMG_FOLDER = "results";
 
-    // ✅ 兩支股票都要顯示（可自行增減）
+    // ✅ 兩支股票：光寶（無代碼檔名）+ 南亞科（有代碼檔名）
+    // fileMode:
+    // - "plain": YYYY-MM-DD_pred.png
+    // - "ticker": YYYY-MM-DD_<TICKER>_pred.png
     const STOCKS = [
-      { ticker: "2408.TW", name: "南亞科" },
-      { ticker: "2301.TW", name: "光寶科" }
+      { ticker: "2301.TW", name: "光寶科", fileMode: "plain" },
+      { ticker: "2408.TW", name: "南亞科", fileMode: "ticker" }
     ];
 
     function getTWDate(baseDate = new Date()) {
@@ -114,19 +125,33 @@
       });
     }
 
-    async function findLatestForStock(stock) {
-      const { ticker } = stock;
+    function buildPaths(dateStr, stock) {
+      const { ticker, fileMode } = stock;
 
+      if (fileMode === "plain") {
+        return {
+          pred: `${IMG_FOLDER}/${dateStr}_pred.png`,
+          backtest: `${IMG_FOLDER}/${dateStr}_backtest.png`
+        };
+      }
+
+      return {
+        pred: `${IMG_FOLDER}/${dateStr}_${ticker}_pred.png`,
+        backtest: `${IMG_FOLDER}/${dateStr}_${ticker}_backtest.png`
+      };
+    }
+
+    // 找最近日期：只要 pred 存在就算成功；backtest 有就加顯示
+    async function findLatestForStock(stock) {
       for (let i = 0; i <= MAX_LOOKBACK_DAYS; i++) {
         const d = new Date();
         d.setDate(d.getDate() - i);
         const dateStr = getTWDate(d);
 
-        const pred = `${IMG_FOLDER}/${dateStr}_${ticker}_pred.png`;
-        const backtest = `${IMG_FOLDER}/${dateStr}_${ticker}_backtest.png`;
+        const { pred, backtest } = buildPaths(dateStr, stock);
 
         const predOK = await loadImageIfExists(pred);
-        if (!predOK) continue; // 沒 pred 就往前找
+        if (!predOK) continue;
 
         const backtestOK = await loadImageIfExists(backtest);
 
@@ -138,7 +163,6 @@
           backtestOK
         };
       }
-
       return null;
     }
 
@@ -155,10 +179,11 @@
 
       const subhint = document.createElement("div");
       subhint.className = "stock-subhint";
-      subhint.textContent = found.offsetDays === 0 ? "（今日）" : `（往前第 ${found.offsetDays} 天）`;
+      subhint.textContent =
+        found.offsetDays === 0 ? "（今日）" : `（往前第 ${found.offsetDays} 天）`;
       block.appendChild(subhint);
 
-      // --- Pred section (一定顯示) ---
+      // --- Pred section（一定顯示） ---
       const predSection = document.createElement("div");
       predSection.className = "section";
       predSection.style.display = "block";
@@ -170,12 +195,12 @@
 
       const predImg = document.createElement("img");
       predImg.alt = `${ticker} Prediction`;
-      predImg.src = found.predSrc; // browser cache bust 已在 loadImageIfExists 做過，但這裡也可再加
+      predImg.src = found.predSrc;
       predSection.appendChild(predImg);
 
       block.appendChild(predSection);
 
-      // --- Backtest section (有才顯示) ---
+      // --- Backtest section（有才顯示） ---
       if (found.backtestOK) {
         const backtestSection = document.createElement("div");
         backtestSection.className = "section";
@@ -199,7 +224,8 @@
 
     async function main() {
       document.getElementById("title").innerText = "每日圖表";
-      document.getElementById("hint").innerText = "若某支股票缺回測圖，會只顯示預測圖（不會報錯）";
+      document.getElementById("hint").innerText =
+        "每支股票若缺回測圖，會只顯示預測圖";
 
       const container = document.getElementById("container");
       container.innerHTML = "";
@@ -209,8 +235,7 @@
       for (const stock of STOCKS) {
         const found = await findLatestForStock(stock);
         if (!found) continue; // 該股最近 N 天都沒 pred → 不顯示
-        const block = createStockBlock(stock, found);
-        container.appendChild(block);
+        container.appendChild(createStockBlock(stock, found));
         shownCount += 1;
       }
 
@@ -226,4 +251,4 @@
 
 </body>
 </html>
-<!-- BUILD_TIME Mon Dec 22 07:06:51 UTC 2025 -->
+<!-- BUILD_TIME Mon Dec 22 06:53:36 UTC 2025 -->
