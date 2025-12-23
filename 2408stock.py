@@ -9,6 +9,10 @@ FireBase_Attention_LSTM_Direction.py (2408.TW 南亞科｜方向更準版 + 更�
 4) ✅ scaler 存檔/載入（續訓不再每天換座標系）
 5) ✅ cap 寫入 meta.json：續訓時沿用同一個 cap（避免模型圖裡 cap 固定卻以為更新了）
 
+✅ NEW：把 Firestore 的外生因子加入模型（不改 Firestore 任何資料位置）
+- TAIEX / ELECTRONICS / USD_TWD：同日對齊
+- SOX / MU_US：以「美股收盤 -> 台股下一個交易日」方式對齊（index + BDay(1)）
+
 ⚠️ 圖表與輸出檔名規則不變（你的 results/xxxx 檔案格式維持原樣）
 """
 
@@ -54,7 +58,7 @@ if key_dict:
 else:
     print("⚠️ FIREBASE 未設定，Firestore 讀取將無資料")
 
-# ================= Firestore 讀取 =================
+# ================= Firestore 讀取（個股） =================
 def load_df_from_firestore(ticker, collection="NEW_stock_data_liteon", days=500):
     rows = []
     if db:
@@ -70,6 +74,59 @@ def load_df_from_firestore(ticker, collection="NEW_stock_data_liteon", days=500)
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").tail(days).set_index("date")
     return df
+
+# ================= Firestore 讀取（外生因子 Close only） =================
+def load_factor_close_from_firestore(alias, collection="NEW_stock_data_liteon", days=800):
+    """
+    讀取 Firestore 文件中的 {alias: {Close: ...}}，回傳 Series(index=date, value=Close)
+    alias 例：TAIEX / ELECTRONICS / USD_TWD / SOX / MU_US
+    """
+    rows = []
+    if db:
+        for doc in db.collection(collection).stream():
+            p = doc.to_dict().get(alias)
+            if isinstance(p, dict) and "Close" in p:
+                rows.append({"date": doc.id, "Close": p["Close"]})
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise ValueError(f"⚠️ Firestore 無資料：{alias}")
+
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").tail(days).set_index("date")
+    s = df["Close"].astype(float)
+    s.name = alias
+    return s
+
+def attach_factors_to_stock_df(df_stock, collection="NEW_stock_data_liteon"):
+    """
+    df_stock: 2408 的 df（index=台股交易日）
+    - 台股/匯率因子（TAIEX/ELECTRONICS/USD_TWD）：直接 reindex + ffill
+    - 美股因子（SOX/MU_US）：把美股日期往後推 1 個 BDay，落在台股下一交易日，再 reindex + ffill
+    ⚠️ 只改 DataFrame（記憶體內），不會改 Firestore 任何資料。
+    """
+    idx = df_stock.index
+
+    # 台股/匯率：同日對齊
+    for a in ["TAIEX", "ELECTRONICS", "USD_TWD"]:
+        try:
+            s = load_factor_close_from_firestore(a, collection=collection)
+            df_stock[a] = s.reindex(idx).ffill()
+        except Exception as e:
+            print(f"⚠️ 無法載入 {a}: {e}")
+
+    # 美股：美股 D 的 Close -> 台股 D+1
+    for a in ["SOX", "MU_US"]:
+        try:
+            s = load_factor_close_from_firestore(a, collection=collection)
+            s_shifted = s.copy()
+            s_shifted.index = (s_shifted.index + BDay(1))
+            s_shifted.name = a
+            df_stock[a] = s_shifted.reindex(idx).ffill()
+        except Exception as e:
+            print(f"⚠️ 無法載入 {a}: {e}")
+
+    return df_stock
 
 # ================= 假日補今天 =================
 def ensure_today_row(df):
@@ -124,14 +181,15 @@ def get_direction_loss():
     # TF 版本不同：有些有 BinaryFocalCrossentropy
     if hasattr(tf.keras.losses, "BinaryFocalCrossentropy"):
         return tf.keras.losses.BinaryFocalCrossentropy(gamma=2.0)
+
     # fallback：加權 BCE（簡單穩）
     def weighted_bce(y_true, y_pred, pos_weight=1.5):
-        # y_true, y_pred shape: (batch, 1)
         y_true = tf.cast(y_true, tf.float32)
         y_pred = tf.clip_by_value(tf.cast(y_pred, tf.float32), 1e-7, 1.0 - 1e-7)
         bce = -(y_true * tf.math.log(y_pred) + (1.0 - y_true) * tf.math.log(1.0 - y_pred))
         w = y_true * pos_weight + (1.0 - y_true) * 1.0
         return tf.reduce_mean(w * bce)
+
     return weighted_bce
 
 # ================= Model build（return 限幅 + 方向與return對齊） =================
@@ -193,7 +251,7 @@ def plot_and_save(df_hist, future_df, ticker):
     x_hist = np.arange(len(hist_dates))
     x_future = np.arange(len(hist_dates), len(all_dates))
 
-    plt.figure(figsize=(18,8))
+    plt.figure(figsize=(18, 8))
     ax = plt.gca()
 
     ax.plot(x_hist, hist["Close"], label="Close")
@@ -203,8 +261,7 @@ def plot_and_save(df_hist, future_df, ticker):
     today_x = x_hist[-1]
     today_y = float(hist["Close"].iloc[-1])
     ax.scatter([today_x], [today_y], marker="*", s=160, label="Today Close")
-    ax.text(today_x, today_y + 0.3, f"Today {today_y:.2f}",
-            fontsize=17, ha="center")
+    ax.text(today_x, today_y + 0.3, f"Today {today_y:.2f}", fontsize=17, ha="center")
 
     ax.plot(
         np.concatenate([[x_hist[-1]], x_future]),
@@ -213,8 +270,7 @@ def plot_and_save(df_hist, future_df, ticker):
     )
 
     for i, price in enumerate(future_df["Pred_Close"]):
-        ax.text(x_future[i], price + 0.3, f"{price:.2f}",
-                color="red", fontsize=15, ha="center")
+        ax.text(x_future[i], price + 0.3, f"{price:.2f}", color="red", fontsize=15, ha="center")
 
     ax.plot(
         np.concatenate([[x_hist[-1]], x_future]),
@@ -234,8 +290,7 @@ def plot_and_save(df_hist, future_df, ticker):
     ax.set_title(f"{ticker} Attention-LSTM 預測")
 
     os.makedirs("results", exist_ok=True)
-    plt.savefig(f"results/{datetime.now():%Y-%m-%d}_{ticker}_pred.png",
-                dpi=300, bbox_inches="tight")
+    plt.savefig(f"results/{datetime.now():%Y-%m-%d}_{ticker}_pred.png", dpi=300, bbox_inches="tight")
     plt.close()
 
 # ================= 回測決策分岔圖（PNG + CSV，讀對應 ticker forecast） =================
@@ -293,20 +348,15 @@ def plot_backtest_error(df, ticker):
     ax = plt.gca()
 
     ax.plot(x_trend, trend["Close"], "k-o", label="Recent Close")
-    ax.plot([x_t, x_t + 1], [close_t, pred_t1], "r--o",
-            linewidth=2.5, label="Pred (t → t+1)")
-    ax.plot([x_t, x_t + 1], [close_t, actual_t1], "g-o",
-            linewidth=2.5, label="Actual (t → t+1)")
+    ax.plot([x_t, x_t + 1], [close_t, pred_t1], "r--o", linewidth=2.5, label="Pred (t → t+1)")
+    ax.plot([x_t, x_t + 1], [close_t, actual_t1], "g-o", linewidth=2.5, label="Actual (t → t+1)")
 
     dx = 0.08
     price_offset = max(0.2, close_t * 0.002)
 
-    ax.text(x_t, close_t + price_offset, f"{close_t:.2f}",
-            ha="center", va="bottom", fontsize=18, color="black")
-    ax.text(x_t + 1 + dx, pred_t1, f"Pred {pred_t1:.2f}",
-            ha="left", va="center", fontsize=16, color="red")
-    ax.text(x_t + 1 + dx, actual_t1, f"Actual {actual_t1:.2f}",
-            ha="left", va="center", fontsize=16, color="green")
+    ax.text(x_t, close_t + price_offset, f"{close_t:.2f}", ha="center", va="bottom", fontsize=18, color="black")
+    ax.text(x_t + 1 + dx, pred_t1, f"Pred {pred_t1:.2f}", ha="left", va="center", fontsize=16, color="red")
+    ax.text(x_t + 1 + dx, actual_t1, f"Actual {actual_t1:.2f}", ha="left", va="center", fontsize=16, color="green")
 
     labels = trend.index.strftime("%m-%d").tolist()
     labels.append(t1.strftime("%m-%d"))
@@ -326,8 +376,7 @@ def plot_backtest_error(df, ticker):
     )
 
     os.makedirs("results", exist_ok=True)
-    plt.savefig(f"results/{today:%Y-%m-%d}_{ticker}_backtest.png",
-                dpi=300, bbox_inches="tight")
+    plt.savefig(f"results/{today:%Y-%m-%d}_{ticker}_backtest.png", dpi=300, bbox_inches="tight")
     plt.close()
 
     bt = pd.DataFrame([{
@@ -340,8 +389,7 @@ def plot_backtest_error(df, ticker):
         "direction_actual": int(np.sign(actual_t1 - close_t))
     }])
 
-    bt.to_csv(f"results/{today:%Y-%m-%d}_{ticker}_backtest.csv",
-              index=False, encoding="utf-8-sig")
+    bt.to_csv(f"results/{today:%Y-%m-%d}_{ticker}_backtest.csv", index=False, encoding="utf-8-sig")
 
 # ================= Main =================
 if __name__ == "__main__":
@@ -349,17 +397,30 @@ if __name__ == "__main__":
     TICKER = "2408.TW"
     LOOKBACK = 40
     STEPS = 5
+    COLLECTION = "NEW_stock_data_liteon"
 
     os.makedirs("results", exist_ok=True)
     MODEL_PATH  = f"results/{TICKER}_model.keras"
     SCALER_PATH = f"results/{TICKER}_scaler.pkl"
     META_PATH   = f"results/{TICKER}_meta.json"
 
-    df = load_df_from_firestore(TICKER, days=500)
+    df = load_df_from_firestore(TICKER, collection=COLLECTION, days=500)
     df = ensure_today_row(df)
     df = add_features(df)
 
-    FEATURES = ["Close", "Volume", "RSI", "MACD", "K", "D", "ATR_14"]
+    # ✅ NEW：接外生因子（只改 DataFrame，不改 Firestore）
+    df = attach_factors_to_stock_df(df, collection=COLLECTION)
+
+    # ✅ NEW：把外生因子加入 FEATURES
+    FEATURES = [
+        "Close", "Volume", "RSI", "MACD", "K", "D", "ATR_14",
+        "TAIEX", "ELECTRONICS", "USD_TWD", "SOX", "MU_US"
+    ]
+
+    # 檢查對齊（可留著，方便確認）
+    cols_check = [c for c in ["Close", "TAIEX", "ELECTRONICS", "USD_TWD", "SOX", "MU_US"] if c in df.columns]
+    print("🔎 factors tail:\n", df[cols_check].tail(5))
+
     df = df.dropna()
 
     X, y_ret, y_dir, idx = create_sequences(df, FEATURES, steps=STEPS, window=LOOKBACK)
@@ -452,7 +513,6 @@ if __name__ == "__main__":
     if os.path.exists(MODEL_PATH):
         print(f"✅ Load existing model: {MODEL_PATH}")
         model = load_model(MODEL_PATH, safe_mode=False)
-        # 重新 compile：偏方向 + fine-tune LR
         model = compile_model(model, direction_weight=DIRECTION_WEIGHT, lr=3e-4)
     else:
         print("✅ Build new model")
@@ -460,7 +520,7 @@ if __name__ == "__main__":
             (LOOKBACK, len(FEATURES)),
             STEPS,
             max_daily_logret=cap_used,
-            dir_from_ret_weight=2.0  # ✅ 方向貼近「未來報酬加總」
+            dir_from_ret_weight=2.0
         )
         model = compile_model(model, direction_weight=DIRECTION_WEIGHT, lr=7e-4)
 
@@ -475,7 +535,7 @@ if __name__ == "__main__":
         callbacks=[EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)]
     )
 
-    # ✅ 訓練完存檔：明天就能續訓（通常更準、更穩）
+    # ✅ 訓練完存檔：明天就能續訓
     model.save(MODEL_PATH)
     print(f"💾 Model saved: {MODEL_PATH}")
 
