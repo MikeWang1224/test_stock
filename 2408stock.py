@@ -101,19 +101,22 @@ def load_factor_close_from_firestore(alias, collection="NEW_stock_data_liteon", 
 def attach_factors_to_stock_df(df_stock, collection="NEW_stock_data_liteon"):
     """
     df_stock: 2408 的 df（index=台股交易日）
-    - 台股/匯率因子（TAIEX/ELECTRONICS/USD_TWD）：直接 reindex + ffill
-    - 美股因子（SOX/MU_US）：把美股日期往後推 1 個 BDay，落在台股下一交易日，再 reindex + ffill
+    - 台股/匯率因子（TAIEX/ELECTRONICS/USD_TWD）：直接 reindex + ffill + bfill
+    - 美股因子（SOX/MU_US）：把美股日期往後推 1 個 BDay，落在台股下一交易日，再 reindex + ffill + bfill
     ⚠️ 只改 DataFrame（記憶體內），不會改 Firestore 任何資料。
     """
+    df_stock = df_stock.copy()
     idx = df_stock.index
 
     # 台股/匯率：同日對齊
     for a in ["TAIEX", "ELECTRONICS", "USD_TWD"]:
         try:
             s = load_factor_close_from_firestore(a, collection=collection)
-            df_stock[a] = s.reindex(idx).ffill()
+            # ✅ 重要：ffill + bfill，避免一開始一串 NaN 直接把整段砍掉
+            df_stock[a] = s.reindex(idx).ffill().bfill()
         except Exception as e:
             print(f"⚠️ 無法載入 {a}: {e}")
+            df_stock[a] = np.nan
 
     # 美股：美股 D 的 Close -> 台股 D+1
     for a in ["SOX", "MU_US"]:
@@ -122,9 +125,11 @@ def attach_factors_to_stock_df(df_stock, collection="NEW_stock_data_liteon"):
             s_shifted = s.copy()
             s_shifted.index = (s_shifted.index + BDay(1))
             s_shifted.name = a
-            df_stock[a] = s_shifted.reindex(idx).ffill()
+            # ✅ 同樣補齊
+            df_stock[a] = s_shifted.reindex(idx).ffill().bfill()
         except Exception as e:
             print(f"⚠️ 無法載入 {a}: {e}")
+            df_stock[a] = np.nan
 
     return df_stock
 
@@ -178,11 +183,9 @@ def create_sequences(df, features, steps=5, window=40):
 
 # ================= Loss（direction 用 focal；不支援就 fallback） =================
 def get_direction_loss():
-    # TF 版本不同：有些有 BinaryFocalCrossentropy
     if hasattr(tf.keras.losses, "BinaryFocalCrossentropy"):
         return tf.keras.losses.BinaryFocalCrossentropy(gamma=2.0)
 
-    # fallback：加權 BCE（簡單穩）
     def weighted_bce(y_true, y_pred, pos_weight=1.5):
         y_true = tf.cast(y_true, tf.float32)
         y_pred = tf.clip_by_value(tf.cast(y_pred, tf.float32), 1e-7, 1.0 - 1e-7)
@@ -194,10 +197,6 @@ def get_direction_loss():
 
 # ================= Model build（return 限幅 + 方向與return對齊） =================
 def build_attention_lstm(input_shape, steps, max_daily_logret=0.06, dir_from_ret_weight=2.0):
-    """
-    dir_from_ret_weight：方向 logit 會加上 sum(raw_returns)*weight
-    - weight 越大，方向越貼近「預測報酬加總」
-    """
     inp = Input(shape=input_shape)
 
     x = LSTM(64, return_sequences=True)(inp)
@@ -208,13 +207,11 @@ def build_attention_lstm(input_shape, steps, max_daily_logret=0.06, dir_from_ret
     context = Lambda(lambda t: tf.reduce_sum(t[0] * t[1], axis=1),
                      name="attn_context")([x, weights])
 
-    # return head
-    raw = Dense(steps, activation="tanh", name="raw_returns")(context)  # (B, steps)
+    raw = Dense(steps, activation="tanh", name="raw_returns")(context)
     out_ret = Lambda(lambda t: t * max_daily_logret, name="return")(raw)
 
-    # ✅ direction head：context 的 logit + 「sum(raw_returns)」的 logit（讓兩頭一致）
-    base_logit = Dense(1, activation=None, name="dir_base_logit")(context)  # (B,1)
-    sum_raw = Lambda(lambda r: tf.reduce_sum(r, axis=1, keepdims=True), name="sum_raw")(raw)  # (B,1)
+    base_logit = Dense(1, activation=None, name="dir_base_logit")(context)
+    sum_raw = Lambda(lambda r: tf.reduce_sum(r, axis=1, keepdims=True), name="sum_raw")(raw)
     dir_logit = Lambda(lambda t: t[0] + dir_from_ret_weight * t[1], name="dir_logit")([base_logit, sum_raw])
     out_dir = Lambda(lambda z: tf.sigmoid(z), name="direction")(dir_logit)
 
@@ -310,7 +307,7 @@ def plot_backtest_error(df, ticker):
             d = pd.to_datetime(f.split("_")[0])
         except Exception:
             continue
-        if d < today:  # 排除今天
+        if d < today:
             forecast_files.append((d, f))
 
     if not forecast_files:
@@ -393,7 +390,6 @@ def plot_backtest_error(df, ticker):
 
 # ================= Main =================
 if __name__ == "__main__":
-    # ✅ 南亞科
     TICKER = "2408.TW"
     LOOKBACK = 40
     STEPS = 5
@@ -411,17 +407,16 @@ if __name__ == "__main__":
     # ✅ NEW：接外生因子（只改 DataFrame，不改 Firestore）
     df = attach_factors_to_stock_df(df, collection=COLLECTION)
 
-    # ✅ NEW：把外生因子加入 FEATURES
     FEATURES = [
         "Close", "Volume", "RSI", "MACD", "K", "D", "ATR_14",
         "TAIEX", "ELECTRONICS", "USD_TWD", "SOX", "MU_US"
     ]
 
-    # 檢查對齊（可留著，方便確認）
     cols_check = [c for c in ["Close", "TAIEX", "ELECTRONICS", "USD_TWD", "SOX", "MU_US"] if c in df.columns]
     print("🔎 factors tail:\n", df[cols_check].tail(5))
 
-    df = df.dropna()
+    # ✅ 關鍵修正 1：不要整張 df.dropna()，只針對模型 FEATURES
+    df = df.dropna(subset=FEATURES)
 
     X, y_ret, y_dir, idx = create_sequences(df, FEATURES, steps=STEPS, window=LOOKBACK)
     print(f"{TICKER} | df rows: {len(df)} | X samples: {len(X)}")
@@ -436,7 +431,6 @@ if __name__ == "__main__":
     y_dir_tr, y_dir_te = y_dir[:split], y_dir[split:]
     idx_tr, idx_te = idx[:split], idx[split:]
 
-    # ✅ scaler.fit 僅用 train 區間（避免 leakage）；但 scaler 要「存檔/載入」讓續訓不漂
     train_end_date = pd.Timestamp(idx_tr[-1])
     df_for_scaler = df.loc[:train_end_date, FEATURES].copy()
 
@@ -459,7 +453,6 @@ if __name__ == "__main__":
     X_tr_s = scale_X(X_tr)
     X_te_s = scale_X(X_te)
 
-    # ✅ A) max_daily_logret 自動化（train |logret| 99% 分位）
     train_close = df.loc[:train_end_date, "Close"].astype(float)
     train_logret_abs = np.log(train_close).diff().dropna().abs()
 
@@ -467,7 +460,6 @@ if __name__ == "__main__":
     auto_cap = float(np.clip(auto_cap, 0.03, 0.10))
     print(f"✅ max_daily_logret auto (99% quantile, clipped): {auto_cap:.4f}")
 
-    # ✅ meta：cap 要固定，避免「你以為更新了，但模型圖裡沒更新」
     meta = {}
     if os.path.exists(META_PATH):
         try:
@@ -494,10 +486,8 @@ if __name__ == "__main__":
             json.dump(meta, f, ensure_ascii=False, indent=2)
         print(f"💾 Meta saved: {META_PATH} (cap={cap_used:.4f})")
 
-    # ✅ B) 方向更準：direction weight 拉高
     DIRECTION_WEIGHT = 0.8
 
-    # ✅ validation：取 train 的最後 10% 當 val（時間序，不 shuffle）
     n_tr = len(X_tr_s)
     val_cut = int(n_tr * 0.90)
     if val_cut < 10:
@@ -509,7 +499,6 @@ if __name__ == "__main__":
 
     print(f"✅ Fit samples: {len(X_fit)} | Val samples: {len(X_val)}")
 
-    # ✅ C) 不要每天從頭訓練：載入續訓（更穩、更容易讓方向準）
     if os.path.exists(MODEL_PATH):
         print(f"✅ Load existing model: {MODEL_PATH}")
         model = load_model(MODEL_PATH, safe_mode=False)
@@ -524,7 +513,6 @@ if __name__ == "__main__":
         )
         model = compile_model(model, direction_weight=DIRECTION_WEIGHT, lr=7e-4)
 
-    # 訓練（✅ 監控 val_loss）
     model.fit(
         X_fit,
         {"return": y_ret_fit, "direction": y_dir_fit},
@@ -535,13 +523,11 @@ if __name__ == "__main__":
         callbacks=[EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)]
     )
 
-    # ✅ 訓練完存檔：明天就能續訓
     model.save(MODEL_PATH)
     print(f"💾 Model saved: {MODEL_PATH}")
 
-    # 預測
     pred_ret, pred_dir = model.predict(X_te_s, verbose=0)
-    raw_returns = pred_ret[-1]  # 已限幅
+    raw_returns = pred_ret[-1]
 
     print(f"📈 {TICKER} 預測方向機率（看漲）: {pred_dir[-1][0]:.2%}")
 
