@@ -97,13 +97,14 @@
     const MAX_LOOKBACK_DAYS = 10;
     const IMG_FOLDER = "results";
 
-    // ✅ 兩支股票：光寶（無代碼檔名）+ 南亞科（有代碼檔名）
+    // ✅ 三支股票：光寶（無代碼檔名）+ 南亞科/華東（有代碼檔名）
     // fileMode:
     // - "plain": YYYY-MM-DD_pred.png
     // - "ticker": YYYY-MM-DD_<TICKER>_pred.png
     const STOCKS = [
       { ticker: "2301.TW", name: "光寶科", fileMode: "plain" },
-      { ticker: "2408.TW", name: "南亞科", fileMode: "ticker" }
+      { ticker: "2408.TW", name: "南亞科", fileMode: "ticker" },
+      { ticker: "8110.TW", name: "華東",   fileMode: "ticker" }   // ✅ 新增
     ];
 
     function getTWDate(baseDate = new Date()) {
@@ -234,7 +235,7 @@
 
       for (const stock of STOCKS) {
         const found = await findLatestForStock(stock);
-        if (!found) continue; // 該股最近 N 天都沒 pred → 不顯示
+        if (!found) continue;
         container.appendChild(createStockBlock(stock, found));
         shownCount += 1;
       }
@@ -251,4 +252,4 @@
 
 </body>
 </html>
-<!-- BUILD_TIME Tue Dec 23 09:28:19 UTC 2025 -->
+<!-- BUILD_TIME Tue Dec 23 09:22:15 UTC 2025 -->
