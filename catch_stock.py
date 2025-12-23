@@ -234,9 +234,17 @@ if __name__ == "__main__":
     df_8110 = fetch_prepare_recalc("8110.TW", period=PERIOD, collection=COLLECTION)
     save_to_firestore(df_8110, "8110.TW", collection=COLLECTION)
 
-    # ➕ 加權指數 / 電子指數（Close only）
+    # ➕ 加權指數（Close only）
     save_index_close("^TWII", "TAIEX", period=PERIOD, collection=COLLECTION)
-    save_index_close("^TWTE", "ELECTRONICS", period=PERIOD, collection=COLLECTION)
+
+    # ✅ 修正：電子類指數（Yahoo 不支援 ^TWTE）
+    # 先試 ^TELI（TSEC electronics subindex），不行再試 IR0027.TW
+    save_factor_close_with_fallback(
+        tickers=["^TELI", "IR0027.TW"],
+        alias="ELECTRONICS",
+        period=PERIOD,
+        collection=COLLECTION,
+    )
 
     # ✅ NEW：外生因子（Close only）
     # 1) 費半 SOX
