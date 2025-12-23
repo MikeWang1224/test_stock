@@ -248,10 +248,22 @@ if __name__ == "__main__":
 
     # ✅ NEW：外生因子（Close only）
     # 1) 費半 SOX
-    save_index_close("^SOX", "SOX", period=PERIOD, collection=COLLECTION)
-
-    # 2) 美光 MU（美股）
-    save_index_close("MU", "MU_US", period=PERIOD, collection=COLLECTION)
+    # 1) 半導體 proxy：先 ^SOX，失敗就用 SOXX 或 SMH
+   save_factor_close_with_fallback(
+       tickers=["^SOX", "SOXX", "SMH"],
+       alias="SOX",
+       period=PERIOD,
+       collection=COLLECTION,
+   )
+   
+   # 2) 美光：先 MU，失敗就用 MU 的其他市場報價（備援通常用不到，但留著不會壞）
+   save_factor_close_with_fallback(
+       tickers=["MU", "MU.VI", "MU.MX"],
+       alias="MU_US",
+       period=PERIOD,
+       collection=COLLECTION,
+   )
+   
 
     # 3) USD/TWD（匯率）— yfinance 代碼可能因地區/資料源不同，做備援
     #    常見：TWD=X（表示 1 USD 換多少 TWD）
