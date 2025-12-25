@@ -1,0 +1,28 @@
+# 基本數據處理
+numpy==1.26.4
+pandas==2.2.3
+
+# 股票資料抓取
+yfinance==0.2.43
+
+# 技術指標計算
+ta==0.10.4
+
+# Firebase / GCS
+firebase-admin==6.5.0
+google-cloud-storage==2.12.0
+
+# 機器學習 / 深度學習
+tensorflow==2.14.0
+scikit-learn==1.3.2
+
+# 繪圖 / 圖表
+matplotlib==3.8.1
+seaborn==0.12.3
+
+# 日期處理 / 時區
+python-dateutil==2.8.2
+pytz==2025.7
+
+# 其他工具
+regex==2025.7.1
