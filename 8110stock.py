@@ -440,7 +440,10 @@ def forecast_6m_trend_index(
 
         # ===== 🔑 重算特徵（非常重要）=====
         df_ext = add_features(df_ext)
-        df_ext = df_ext.dropna()
+
+# ✅ 只確保最後 lookback 行完整即可
+        df_ext = df_ext.iloc[-(lookback + 25):].dropna()
+
 
     # ===== 組 Trend DataFrame =====
     trend_df = pd.DataFrame({
