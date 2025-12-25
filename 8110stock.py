@@ -419,7 +419,9 @@ def plot_6m_trend_advanced(
     # =============================
     # 4️⃣ 震盪幅度（ATR × RSI）
     # =============================
-    atr = df["ATR"].iloc[-20:].mean()
+    atr = last_valid_value(df, "ATR_14", lookback=40)
+    if atr is None:
+        raise ValueError("❌ 無可用 ATR_14（最近 40 日皆為 NaN）")
     atr_ratio = atr / last_close
 
     rsi = df["RSI"].iloc[-1]
@@ -483,6 +485,19 @@ def plot_6m_trend_advanced(
     plt.savefig(out, dpi=300, bbox_inches="tight")
     plt.close()
 
+def last_valid_value(df: pd.DataFrame, col: str, lookback: int = 30):
+    """
+    取最近一筆有效（非 NaN）的指標值
+    - 用於非交易日 / 補 today row 的情況
+    """
+    if col not in df.columns:
+        return None
+
+    s = df[col].iloc[-lookback:]
+    s = s[s.notna()]
+    if s.empty:
+        return None
+    return float(s.iloc[-1])
 
 
 
