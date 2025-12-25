@@ -117,7 +117,16 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     close = df["Close"].astype(float)
     df["RET_STD_20"] = np.log(close).diff().rolling(20).std()
 
+    # 🔧 ADD: Regime / 波段狀態特徵（不存 Firebase）
+    ma60 = df["Close"].rolling(60)
+    df["TREND_60"] = (df["Close"] - ma60.mean()) / (ma60.std() + 1e-9)
+    
+    df["TREND_SLOPE_20"] = (
+        df["Close"].rolling(20).mean().diff()
+    ) / df["Close"]
+    
     return df
+
 
 # ================= Sequence（標準化 return，避免波動 regime 影響） =================
 def create_sequences(df, features, steps=5, window=40, eps=1e-9):
@@ -585,8 +594,11 @@ if __name__ == "__main__":
     FEATURES = [
         "Close", "Open", "High", "Low",
         "Volume", "RSI", "MACD", "K", "D", "ATR_14",
-        "HL_RANGE", "GAP", "VOL_REL"
+        "HL_RANGE", "GAP", "VOL_REL",
+        "TREND_60",          # 🔧 ADD
+        "TREND_SLOPE_20"     # 🔧 ADD
     ]
+
 
     missing = [c for c in FEATURES if c not in df.columns]
     if missing:
@@ -671,10 +683,25 @@ if __name__ == "__main__":
         scale_last = float(np.log(df["Close"].astype(float)).diff().rolling(20).std().iloc[-1])
     scale_last = max(scale_last, 1e-6)
 
+
+    # 🔧 ADD: Regime-based 波段放大 / 壓縮（用最近的 TREND_60）
+    trend60 = last_valid_value(df, "TREND_60", lookback=5)
+    
+    amp = 1.0
+    if trend60 is not None:
+        if trend60 > 1.0:
+            amp = 1.4      # 強趨勢 → 放大
+        elif trend60 < -1.0:
+            amp = 1.3      # 強空趨勢
+        elif abs(trend60) < 0.5:
+            amp = 0.6      # 盤整 → 壓縮
+    
+    print(f"📊 Regime amp = {amp:.2f}")
+
     prices = []
     price = last_close
     for r_norm in raw_norm_returns:
-        r = float(r_norm) * scale_last
+        r = float(r_norm) * scale_last * amp
         price *= np.exp(r)
         prices.append(price)
 
