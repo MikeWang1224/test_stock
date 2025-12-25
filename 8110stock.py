@@ -406,16 +406,20 @@ def plot_6m_trend_advanced(
     cycle_p = np.clip(int(round(1 / freq_p[idx_p])), 40, 120)
 
     # =============================
-    # 3️⃣ 回檔週期（成交量）
-    # =============================
-    vol = last_valid_value(df, "Volume", lookback=40)
+# 3️⃣ 回檔週期（成交量）
+# =============================
+    vol_series = df["Volume"].iloc[-180:].dropna().values
+    
+    if len(vol_series) < 60:
+        cycle_v = 30  # fallback
+    else:
+        vol_centered = vol_series - vol_series.mean()
+    
+        fft_v = np.fft.rfft(vol_centered)
+        freq_v = np.fft.rfftfreq(len(vol_centered), d=1)
+        idx_v = np.argmax(np.abs(fft_v[1:])) + 1
+        cycle_v = np.clip(int(round(1 / freq_v[idx_v])), 20, 60)
 
-    vol = vol - vol.mean()
-
-    fft_v = np.fft.rfft(vol)
-    freq_v = np.fft.rfftfreq(len(vol), d=1)
-    idx_v = np.argmax(np.abs(fft_v[1:])) + 1
-    cycle_v = np.clip(int(round(1 / freq_v[idx_v])), 20, 60)
 
     # =============================
     # 4️⃣ 震盪幅度（ATR × RSI）
