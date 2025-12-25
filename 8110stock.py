@@ -369,75 +369,122 @@ def plot_backtest_error(df, ticker: str):
     bt.to_csv(out_csv, index=False, encoding="utf-8-sig")
 
 # ================= 6M Trend Plot（x 軸 = 月） =================
-def plot_6m_trend(
+def plot_6m_trend_advanced(
+    df: pd.DataFrame,
     last_close: float,
     raw_norm_returns: np.ndarray,
     scale_last: float,
     ticker: str,
     asof_date: pd.Timestamp
 ):
-    """
-    6 個月趨勢預測圖（非日頻，不 rollout）
-    - x 軸：每月
-    - y 軸：趨勢價格路徑（smooth, regime-based）
-    """
-
-    # ===== 參數 =====
     MONTHS = 6
-    TRADING_DAYS_PER_MONTH = 21
+    DPM = 21
 
-    # 用短期 normalized return 當「趨勢斜率 proxy」
-    daily_norm_slope = float(np.mean(raw_norm_returns))
+    # =============================
+    # 1️⃣ 主升趨勢（模型）
+    # =============================
+    daily_slope = float(np.mean(raw_norm_returns))
+    monthly_logret = daily_slope * scale_last * DPM
 
-    # 換算成「月 log-return」
-    monthly_logret = daily_norm_slope * scale_last * TRADING_DAYS_PER_MONTH
-
-    # ===== 推 6 個月（只 6 點）=====
-    prices = []
+    trend = []
     p = last_close
     for _ in range(MONTHS):
         p *= np.exp(monthly_logret)
-        prices.append(p)
+        trend.append(p)
 
-    # ===== x 軸（月）=====
-    month_labels = pd.date_range(
-        start=asof_date + pd.offsets.MonthBegin(1),
+    trend = np.array(trend)
+
+    # =============================
+    # 2️⃣ 主週期（價格）
+    # =============================
+    close = df["Close"].iloc[-180:].values
+    close = close - close.mean()
+
+    fft_p = np.fft.rfft(close)
+    freq_p = np.fft.rfftfreq(len(close), d=1)
+    idx_p = np.argmax(np.abs(fft_p[1:])) + 1
+    cycle_p = np.clip(int(round(1 / freq_p[idx_p])), 40, 120)
+
+    # =============================
+    # 3️⃣ 回檔週期（成交量）
+    # =============================
+    vol = df["Volume"].iloc[-180:].values
+    vol = vol - vol.mean()
+
+    fft_v = np.fft.rfft(vol)
+    freq_v = np.fft.rfftfreq(len(vol), d=1)
+    idx_v = np.argmax(np.abs(fft_v[1:])) + 1
+    cycle_v = np.clip(int(round(1 / freq_v[idx_v])), 20, 60)
+
+    # =============================
+    # 4️⃣ 震盪幅度（ATR × RSI）
+    # =============================
+    atr = df["ATR"].iloc[-20:].mean()
+    atr_ratio = atr / last_close
+
+    rsi = df["RSI"].iloc[-1]
+    rsi_factor = np.clip(abs(rsi - 50) / 50, 0.3, 1.2)
+
+    base_amp = atr_ratio * rsi_factor
+    base_amp = np.clip(base_amp, 0.02, 0.18)
+
+    # =============================
+    # 5️⃣ 合成價格（多週期）
+    # =============================
+    prices = [last_close]
+
+    for m in range(1, MONTHS + 1):
+        phase_p = 2 * np.pi * (m * DPM) / cycle_p
+        phase_v = 2 * np.pi * (m * DPM) / cycle_v
+
+        cycle_main = base_amp * np.sin(phase_p)
+        cycle_pull = 0.6 * base_amp * np.sin(phase_v + np.pi)
+
+        price = trend[m - 1] * (1 + cycle_main + cycle_pull)
+        prices.append(price)
+
+    prices = np.array(prices)
+
+    # =============================
+    # 6️⃣ 區間帶（ATR-based fan）
+    # =============================
+    upper = prices * (1 + 1.2 * base_amp)
+    lower = prices * (1 - 1.2 * base_amp)
+
+    # =============================
+    # 7️⃣ X 軸（月）
+    # =============================
+    labels = ["Now"] + pd.date_range(
+        asof_date + pd.offsets.MonthBegin(1),
         periods=MONTHS,
         freq="MS"
     ).strftime("%Y-%m").tolist()
 
-    # ===== Plot =====
-    plt.figure(figsize=(14, 6))
-    ax = plt.gca()
-
+    # =============================
+    # 8️⃣ Plot
+    # =============================
+    plt.figure(figsize=(15, 7))
     x = np.arange(MONTHS + 1)
-    y = [last_close] + prices
 
-    ax.plot(x, y, "r-o", linewidth=2.8, label="6M Trend Forecast")
-    ax.scatter(0, last_close, s=160, marker="*", label="Today")
+    plt.fill_between(x, lower, upper, alpha=0.18, label="Expected Range")
+    plt.plot(x, prices, "r-o", linewidth=2.8, label="Projected Path")
+    plt.scatter(0, prices[0], s=180, marker="*", label="Today")
 
-    for i, p in enumerate(prices):
-        ax.text(i + 1, p, f"{p:.2f}", ha="center", va="bottom", fontsize=14)
+    for i, p in enumerate(prices[1:]):
+        plt.text(i + 1, p, f"{p:.2f}", ha="center", fontsize=12)
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(["Now"] + month_labels, fontsize=13)
-    ax.set_ylabel("Price")
-    ax.set_title(f"{ticker} · 6-Month Trend Outlook")
-
-    ax.grid(alpha=0.3)
-    ax.legend()
+    plt.xticks(x, labels, fontsize=13)
+    plt.title(f"{ticker} · 6M Outlook (Multi-Cycle + ATR + RSI)")
+    plt.grid(alpha=0.3)
+    plt.legend()
 
     os.makedirs("results", exist_ok=True)
-    out_png = f"results/{datetime.now():%Y-%m-%d}_{ticker}_6m_trend.png"
-    plt.savefig(out_png, dpi=300, bbox_inches="tight")
+    out = f"results/{datetime.now():%Y-%m-%d}_{ticker}_6m_advanced.png"
+    plt.savefig(out, dpi=300, bbox_inches="tight")
     plt.close()
 
-    # ===== 同步輸出 CSV =====
-    out_csv = f"results/{datetime.now():%Y-%m-%d}_{ticker}_6m_trend.csv"
-    pd.DataFrame({
-        "month": month_labels,
-        "pred_price": prices
-    }).to_csv(out_csv, index=False, encoding="utf-8-sig")
+
+
 
 # ================= Main =================
 if __name__ == "__main__":
