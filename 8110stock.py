@@ -383,16 +383,26 @@ def plot_6m_trend_advanced(
     # =============================
     # 1️⃣ 主升趨勢（模型）
     # =============================
-    daily_slope = float(np.mean(raw_norm_returns))
-    monthly_logret = daily_slope * scale_last * DPM
-
+    # =============================
+# 1️⃣ 主升趨勢（低頻，來自歷史價格）
+# =============================
+# 用近 120 個交易日估計「長期 drift」
+    log_price = np.log(df["Close"].astype(float))
+    ret_ewm = log_price.diff().ewm(span=60).mean()
+    
+    daily_drift = float(ret_ewm.iloc[-1])
+    daily_drift = np.clip(daily_drift, -0.01, 0.01)  # 防爆（±1% / day）
+    
+    monthly_logret = daily_drift * DPM
+    
     trend = []
     p = last_close
     for _ in range(MONTHS):
         p *= np.exp(monthly_logret)
         trend.append(p)
-
+    
     trend = np.array(trend)
+
 
     # =============================
     # 2️⃣ 主週期（價格）
