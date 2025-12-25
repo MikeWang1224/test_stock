@@ -392,7 +392,22 @@ def plot_6m_trend_advanced(
     
     daily_drift = float(ret_ewm.iloc[-1])
     daily_drift = np.clip(daily_drift, -0.01, 0.01)  # 防爆（±1% / day）
-    
+
+
+    rsi = last_valid_value(df, "RSI", lookback=40)
+
+    if rsi is not None:
+        if rsi > 75:
+            drift_scale = 0.4
+        elif rsi > 65:
+            drift_scale = 0.6
+        elif rsi < 40:
+            drift_scale = 1.1
+        else:
+            drift_scale = 1.0
+
+        daily_drift *= drift_scale
+      
     monthly_logret = daily_drift * DPM
     
     trend = []
@@ -402,6 +417,7 @@ def plot_6m_trend_advanced(
         trend.append(p)
     
     trend = np.array(trend)
+    
 
 
     # =============================
