@@ -408,7 +408,8 @@ def plot_6m_trend_advanced(
     # =============================
     # 3️⃣ 回檔週期（成交量）
     # =============================
-    vol = df["Volume"].iloc[-180:].values
+    vol = last_valid_value(df, "Volume", lookback=40)
+
     vol = vol - vol.mean()
 
     fft_v = np.fft.rfft(vol)
@@ -424,7 +425,7 @@ def plot_6m_trend_advanced(
         raise ValueError("❌ 無可用 ATR_14（最近 40 日皆為 NaN）")
     atr_ratio = atr / last_close
 
-    rsi = df["RSI"].iloc[-1]
+    rsi = last_valid_value(df, "RSI", lookback=40)
     rsi_factor = np.clip(abs(rsi - 50) / 50, 0.3, 1.2)
 
     base_amp = atr_ratio * rsi_factor
