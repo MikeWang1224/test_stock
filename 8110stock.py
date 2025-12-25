@@ -394,19 +394,33 @@ def plot_6m_trend_advanced(
     daily_drift = np.clip(daily_drift, -0.01, 0.01)  # 防爆（±1% / day）
 
 
+    # ===== Regime 判斷（Priority 1）=====
+    atr = last_valid_value(df, "ATR_14", lookback=40)
     rsi = last_valid_value(df, "RSI", lookback=40)
+    
+    # 波動強度（相對價格）
+    vol_regime = atr / last_close if atr else 0.03
+    
+    # 趨勢可信度分數（0~1）
+    trend_score = 1.0
+    
+    # 1️⃣ 高檔過熱 → drift 不可信
+    if rsi and rsi > 75:
+        trend_score *= 0.3
+    elif rsi and rsi > 65:
+        trend_score *= 0.6
+    
+    # 2️⃣ 超低波動 → 偏盤整
+    if vol_regime < 0.015:
+        trend_score *= 0.5
+    
+    # 3️⃣ 超高波動 → regime 不穩
+    if vol_regime > 0.08:
+        trend_score *= 0.7
+    
+    # 最終調整 drift
+    daily_drift *= trend_score
 
-    if rsi is not None:
-        if rsi > 75:
-            drift_scale = 0.4
-        elif rsi > 65:
-            drift_scale = 0.6
-        elif rsi < 40:
-            drift_scale = 1.1
-        else:
-            drift_scale = 1.0
-
-        daily_drift *= drift_scale
       
     monthly_logret = daily_drift * DPM
     
