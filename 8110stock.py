@@ -643,7 +643,8 @@ if __name__ == "__main__":
     plot_and_save(df, future_df, ticker=TICKER)
     plot_backtest_error(df, ticker=TICKER)
     # ================= 6M Trend Forecast（x 軸 = 月） =================
-    plot_6m_trend(
+    plot_6m_trend_advanced(
+        df=df,
         last_close=last_close,
         raw_norm_returns=raw_norm_returns,
         scale_last=scale_last,
