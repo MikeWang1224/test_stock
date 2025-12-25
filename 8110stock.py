@@ -368,6 +368,77 @@ def plot_backtest_error(df, ticker: str):
     out_csv = f"results/{today:%Y-%m-%d}_{ticker}_backtest.csv"
     bt.to_csv(out_csv, index=False, encoding="utf-8-sig")
 
+# ================= 6M Trend Plot（x 軸 = 月） =================
+def plot_6m_trend(
+    last_close: float,
+    raw_norm_returns: np.ndarray,
+    scale_last: float,
+    ticker: str,
+    asof_date: pd.Timestamp
+):
+    """
+    6 個月趨勢預測圖（非日頻，不 rollout）
+    - x 軸：每月
+    - y 軸：趨勢價格路徑（smooth, regime-based）
+    """
+
+    # ===== 參數 =====
+    MONTHS = 6
+    TRADING_DAYS_PER_MONTH = 21
+
+    # 用短期 normalized return 當「趨勢斜率 proxy」
+    daily_norm_slope = float(np.mean(raw_norm_returns))
+
+    # 換算成「月 log-return」
+    monthly_logret = daily_norm_slope * scale_last * TRADING_DAYS_PER_MONTH
+
+    # ===== 推 6 個月（只 6 點）=====
+    prices = []
+    p = last_close
+    for _ in range(MONTHS):
+        p *= np.exp(monthly_logret)
+        prices.append(p)
+
+    # ===== x 軸（月）=====
+    month_labels = pd.date_range(
+        start=asof_date + pd.offsets.MonthBegin(1),
+        periods=MONTHS,
+        freq="MS"
+    ).strftime("%Y-%m").tolist()
+
+    # ===== Plot =====
+    plt.figure(figsize=(14, 6))
+    ax = plt.gca()
+
+    x = np.arange(MONTHS + 1)
+    y = [last_close] + prices
+
+    ax.plot(x, y, "r-o", linewidth=2.8, label="6M Trend Forecast")
+    ax.scatter(0, last_close, s=160, marker="*", label="Today")
+
+    for i, p in enumerate(prices):
+        ax.text(i + 1, p, f"{p:.2f}", ha="center", va="bottom", fontsize=14)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(["Now"] + month_labels, fontsize=13)
+    ax.set_ylabel("Price")
+    ax.set_title(f"{ticker} · 6-Month Trend Outlook")
+
+    ax.grid(alpha=0.3)
+    ax.legend()
+
+    os.makedirs("results", exist_ok=True)
+    out_png = f"results/{datetime.now():%Y-%m-%d}_{ticker}_6m_trend.png"
+    plt.savefig(out_png, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # ===== 同步輸出 CSV =====
+    out_csv = f"results/{datetime.now():%Y-%m-%d}_{ticker}_6m_trend.csv"
+    pd.DataFrame({
+        "month": month_labels,
+        "pred_price": prices
+    }).to_csv(out_csv, index=False, encoding="utf-8-sig")
+
 # ================= Main =================
 if __name__ == "__main__":
     TICKER = "8110.TW"
@@ -524,3 +595,11 @@ if __name__ == "__main__":
     # ✅ 圖輸出（內容不動、檔名改含 ticker）
     plot_and_save(df, future_df, ticker=TICKER)
     plot_backtest_error(df, ticker=TICKER)
+    # ================= 6M Trend Forecast（x 軸 = 月） =================
+    plot_6m_trend(
+        last_close=last_close,
+        raw_norm_returns=raw_norm_returns,
+        scale_last=scale_last,
+        ticker=TICKER,
+        asof_date=asof_date
+    )
