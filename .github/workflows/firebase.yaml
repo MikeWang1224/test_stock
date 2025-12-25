@@ -46,18 +46,18 @@ jobs:
           python catch_stock.py
 
       # ---------------- 再跑 LSTM / 預測 / 繪圖：光寶 ----------------
-      - name: Run stock prediction program (Liteon - 2301stock.py)
-        env:
-          FIREBASE: ${{ secrets.FIREBASE }}
-        run: |
-          python 2301stock.py
+      # - name: Run stock prediction program (Liteon - 2301stock.py)
+      #   env:
+      #     FIREBASE: ${{ secrets.FIREBASE }}
+      #   run: |
+      #     python 2301stock.py
 
-      # ---------------- 再跑 LSTM / 預測 / 繪圖：南亞科 ----------------
-      - name: Run stock prediction program (Nanya - 2408stock.py)
-        env:
-          FIREBASE: ${{ secrets.FIREBASE }}
-        run: |
-          python 2408stock.py
+      # # ---------------- 再跑 LSTM / 預測 / 繪圖：南亞科 ----------------
+      # - name: Run stock prediction program (Nanya - 2408stock.py)
+      #   env:
+      #     FIREBASE: ${{ secrets.FIREBASE }}
+      #   run: |
+      #     python 2408stock.py
 
       # ---------------- 再跑 LSTM / 預測 / 繪圖：華東 ----------------
       - name: Run stock prediction program (Huatung - 8110stock.py)
