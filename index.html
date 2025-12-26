@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>測試版每日模型圖表</title>
+  <title>每日模型圖表（手機友好版）</title>
 
   <style>
     body {
@@ -27,11 +27,30 @@
       margin-bottom: 20px;
     }
 
+    #container {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+
+    @media (min-width: 768px) {
+      #container {
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      }
+    }
+
     .stock-block {
-      max-width: 900px;
-      margin: 0 auto 44px auto;
-      padding-left: 14px;
+      background: #111;
       border-left: 4px solid #444;
+      border-radius: 10px;
+      padding: 14px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .stock-block:active {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 16px rgba(0,0,0,0.6);
     }
 
     .stock-header {
@@ -44,6 +63,7 @@
       font-size: 13px;
       color: #aaa;
       margin-bottom: 10px;
+      word-break: break-word;
     }
 
     .section {
@@ -62,12 +82,15 @@
 
     img {
       width: 100%;
+      max-width: 100%;
+      height: auto;
       border-radius: 6px;
       display: block;
       filter: contrast(1.05) saturate(1.05);
     }
 
     @media (min-width: 768px) {
+      h1 { font-size: 28px; }
       .stock-header { font-size: 26px; }
       .section-title { font-size: 28px; }
       .section-title.big { font-size: 34px; }
@@ -170,7 +193,7 @@
 
         ${found6m ? `
         <div class="section">
-          <div class="section-title big">📈 六個月”趨勢“（價格僅供參考）</div>
+          <div class="section-title big">📈 六個月趨勢（價格僅供參考）</div>
           <img src="${found6m.img}">
         </div>` : ""}
       `;
@@ -184,4 +207,3 @@
 
 </body>
 </html>
-<!-- BUILD_TIME Fri Dec 26 05:12:59 UTC 2025 -->
