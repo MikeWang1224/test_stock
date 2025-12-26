@@ -17,37 +17,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ---------------- Checkout ----------------
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ---------------- Python ----------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # ---------------- Install deps ----------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install --no-cache-dir -r requirements.txt
 
-      # ---------------- Verify finmind (關鍵防雷) ----------------
+      # 🔍 驗證 finmind 是否真的存在（關鍵）
       - name: Verify finmind installed
         run: |
-          python - << 'EOF'
-import sys
-print("Python:", sys.version)
+          python -c "import sys, finmind; from finmind.data import DataLoader; print('Python:', sys.version); print('finmind OK'); print('finmind version:', finmind.__version__)"
 
-import finmind
-from finmind.data import DataLoader
-
-print("finmind OK")
-print("finmind version:", finmind.__version__)
-EOF
-
-      # ---------------- 抓股價 + 技術指標 ----------------
+      # ---------------- 先抓股價 + 技術指標 ----------------
       - name: Run stock data collection (catch_stock.py)
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
@@ -84,7 +72,7 @@ EOF
             echo "<!-- BUILD_TIME $(date) -->" >> index.html
           fi
 
-      # ---------------- Commit & Push ----------------
+      # ---------------- Commit 結果 ----------------
       - name: Commit & push results and html
         run: |
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
