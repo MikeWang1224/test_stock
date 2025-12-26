@@ -46,29 +46,6 @@
       margin-bottom: 10px;
     }
 
-    .model-summary {
-      font-size: 15px;
-      font-weight: 700;
-      margin-bottom: 8px;
-    }
-
-    .up { color: #4CAF50; }
-    .down { color: #F44336; }
-    .neutral { color: #FFC107; }
-
-    .confidence-bar {
-      height: 6px;
-      background: #333;
-      border-radius: 4px;
-      overflow: hidden;
-      margin-bottom: 14px;
-    }
-
-    .confidence-fill {
-      height: 100%;
-      background: linear-gradient(90deg, #FFC107, #4CAF50);
-    }
-
     .section {
       margin-bottom: 28px;
     }
@@ -101,7 +78,7 @@
 <body>
 
 <h1>每日模型圖表</h1>
-<div class="hint">短線＝明日｜趨勢＝多日結構（六個月圖僅供方向參考）</div>
+<div class="hint">六個月圖僅供方向參考</div>
 
 <div id="container"></div>
 
@@ -109,14 +86,6 @@
   const IMG_FOLDER = "results";
   const MAX_LOOKBACK_DAYS = 10;
 
-  function mockModelOutput() {
-    return {
-      dir1: 0.45 + Math.random() * 0.3,
-      dirN: 0.45 + Math.random() * 0.3
-    };
-  }
-
-  // ✅ 華東（8110）放第一，其餘照原順序
   const STOCKS = [
     { ticker: "8110.TW", name: "華東" },
     { ticker: "2301.TW", name: "光寶科" },
@@ -157,7 +126,6 @@
     return null;
   }
 
-  // 🔹 只有 8110.TW 才顯示 6M
   async function findLatest6M(stock) {
     if (stock.ticker !== "8110.TW") return null;
 
@@ -173,12 +141,6 @@
     return null;
   }
 
-  function classify(p, mode) {
-    if (p > 0.55) return ["up", mode==="short" ? "📈 偏多" : "📈 趨勢偏多"];
-    if (p < 0.45) return ["down", mode==="short" ? "📉 偏空" : "📉 趨勢偏空"];
-    return ["neutral", mode==="short" ? "⚠️ 短線震盪" : "⚠️ 趨勢中性"];
-  }
-
   async function main() {
     const c = document.getElementById("container");
 
@@ -188,28 +150,12 @@
 
       const found6m = await findLatest6M(s);
 
-      const m = mockModelOutput();
-      const [c1, t1] = classify(m.dir1, "short");
-      const [,  t2] = classify(m.dirN, "trend");
-      const conf = Math.round(Math.max(m.dir1, m.dirN) * 100);
-
       const block = document.createElement("div");
       block.className = "stock-block";
-      block.style.borderLeftColor =
-        c1==="up" ? "#4CAF50" : c1==="down" ? "#F44336" : "#FFC107";
 
       block.innerHTML = `
         <div class="stock-header">${s.name}（${s.ticker}）｜${found.date}</div>
         <div class="stock-subhint">${found.offset===0?"（今日）":`（往前 ${found.offset} 天）`}</div>
-
-        <div class="model-summary ${c1}">
-          ${t1}（明日 ${(m.dir1*100).toFixed(0)}%）｜
-          ${t2}（${(m.dirN*100).toFixed(0)}%）
-        </div>
-
-        <div class="confidence-bar">
-          <div class="confidence-fill" style="width:${conf}%"></div>
-        </div>
 
         <div class="section">
           <div class="section-title">收盤價＋均線＋模型預測</div>
@@ -238,4 +184,3 @@
 
 </body>
 </html>
-<!-- BUILD_TIME Fri Dec 26 05:00:01 UTC 2025 -->
