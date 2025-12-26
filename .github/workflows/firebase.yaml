@@ -2,10 +2,8 @@ name: Run Stock Programs (Liteon + Nanya + Huatung)
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   schedule:
-    # 每天 UTC 05:50 = 台灣時間 13:50
     - cron: '50 5 * * *'
   workflow_dispatch:
 
@@ -32,45 +30,44 @@ jobs:
           pip install --no-cache-dir -r requirements.txt
           pip install --no-cache-dir FinMind==1.7.5
 
-      # ---------------- 驗證 FinMind（一定要） ----------------
-      - name: Verify finmind installed
+      # ---------------- 驗證 FinMind（重點） ----------------
+      - name: Verify FinMind
         run: |
           python - << 'EOF'
-          import sys
-          print("Python:", sys.version)
-          
-          import finmind
-          from finmind.data import DataLoader
-          
-          print("finmind OK")
-          print("finmind version:", finmind.__version__)
-          EOF
+import sys
+print("Python:", sys.version)
+
+import finmind
+from finmind.data import DataLoader
+
+print("FinMind OK")
+print("FinMind version:", finmind.__version__)
+EOF
 
       # ---------------- 抓股價 + 技術指標 ----------------
-      - name: Run stock data collection (catch_stock.py)
+      - name: Run stock data collection
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
-        run: |
-          python catch_stock.py
+        run: python catch_stock.py
 
       # ---------------- LSTM / 預測 / 繪圖 ----------------
-      - name: Run stock prediction program (Liteon)
+      - name: Run Liteon
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
         run: python 2301stock.py
 
-      - name: Run stock prediction program (Nanya)
+      - name: Run Nanya
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
         run: python 2408stock.py
 
-      - name: Run stock prediction program (Huatung)
+      - name: Run Huatung
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
         run: python 8110stock.py
 
       # ---------------- 更新 HTML ----------------
-      - name: Update build time in index.html
+      - name: Update build time
         run: |
           if grep -q "BUILD_TIME" index.html; then
             sed -i "s|<!-- BUILD_TIME.*-->|<!-- BUILD_TIME $(date) -->|" index.html
@@ -79,7 +76,7 @@ jobs:
           fi
 
       # ---------------- Commit ----------------
-      - name: Commit & push results
+      - name: Commit & push
         run: |
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
