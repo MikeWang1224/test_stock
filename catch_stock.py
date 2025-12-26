@@ -7,7 +7,7 @@ from firebase_admin import credentials, firestore
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from finMind.data import DataLoader
+from finmind.data import DataLoader
 
 # ---------------- FinMind 初始化 ----------------
 FINMIND_TOKEN = os.getenv("FINMIND_API_TOKEN")
