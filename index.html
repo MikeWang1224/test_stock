@@ -1,101 +1,144 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>每日模型圖表</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>每日模型圖表</title>
 
-  <style>
-    body {
-      margin: 0;
-      padding: 14px;
-      background: #000;
-      color: #fff;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto;
-    }
+<style>
+body {
+  margin: 0;
+  padding: 14px;
+  background: #000;
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto;
+  line-height: 1.6;
+}
 
-    h1 {
-      font-size: 20px;
-      margin-bottom: 6px;
-      text-align: center;
-    }
+h1 {
+  font-size: 20px;
+  margin-bottom: 6px;
+  text-align: center;
+}
 
-    .hint {
-      text-align: center;
-      font-size: 14px;
-      color: #aaa;
-      margin-bottom: 20px;
-    }
+.hint {
+  text-align: center;
+  font-size: 14px;
+  color: #aaa;
+  margin-bottom: 24px;
+}
 
-    .stock-block {
-      max-width: 900px;
-      margin: 0 auto 44px auto;
-      padding-left: 14px;
-      border-left: 4px solid #444;
-    }
+.stock-block {
+  max-width: 900px;
+  margin: 0 auto 44px auto;
+  padding-left: 14px;
+  border-left: 4px solid #444;
+}
 
-    .stock-header {
-      font-size: 20px;
-      font-weight: 800;
-      margin-bottom: 6px;
-    }
+.stock-header {
+  font-size: 20px;
+  font-weight: 800;
+  margin-bottom: 4px;
+}
 
-    .stock-subhint {
-      font-size: 13px;
-      color: #aaa;
-      margin-bottom: 10px;
-    }
+.stock-subhint {
+  font-size: 13px;
+  color: #aaa;
+  margin-bottom: 8px;
+}
 
-    .model-summary {
-      font-size: 15px;
-      font-weight: 700;
-      margin-bottom: 8px;
-    }
+/* ===== 決策條 ===== */
+.decision-strip {
+  font-size: 16px;
+  font-weight: 800;
+  padding: 10px 14px;
+  margin: 10px 0 14px 0;
+  border-radius: 6px;
+  background: #111;
+}
 
-    .up { color: #4CAF50; }
-    .down { color: #F44336; }
-    .neutral { color: #FFC107; }
+.decision-strip.up {
+  border-left: 6px solid #4CAF50;
+  color: #4CAF50;
+}
 
-    .confidence-bar {
-      height: 6px;
-      background: #333;
-      border-radius: 4px;
-      overflow: hidden;
-      margin-bottom: 14px;
-    }
+.decision-strip.down {
+  border-left: 6px solid #F44336;
+  color: #F44336;
+}
 
-    .confidence-fill {
-      height: 100%;
-      background: linear-gradient(90deg, #FFC107, #4CAF50);
-    }
+.decision-strip.neutral {
+  border-left: 6px solid #FFC107;
+  color: #FFC107;
+}
 
-    .section {
-      margin-bottom: 28px;
-    }
+.model-summary {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
 
-    .section-title {
-      font-size: 16px;
-      font-weight: 700;
-      margin-bottom: 10px;
-    }
+.up { color: #4CAF50; }
+.down { color: #F44336; }
+.neutral { color: #FFC107; }
 
-    .section-title.big {
-      font-size: 18px;
-    }
+/* ===== 信心條 ===== */
+.confidence-bar {
+  height: 6px;
+  background: #333;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 18px;
+}
 
-    img {
-      width: 100%;
-      border-radius: 6px;
-      display: block;
-      filter: contrast(1.05) saturate(1.05);
-    }
+.confidence-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #FFC107, #4CAF50);
+}
 
-    @media (min-width: 768px) {
-      .stock-header { font-size: 26px; }
-      .section-title { font-size: 28px; }
-      .section-title.big { font-size: 34px; }
-    }
-  </style>
+/* ===== 圖區 ===== */
+.section {
+  margin-bottom: 28px;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.section-title.big {
+  font-size: 18px;
+}
+
+img {
+  width: 100%;
+  border-radius: 6px;
+  display: block;
+  filter: contrast(1.05) saturate(1.05);
+}
+
+/* ===== 折疊 ===== */
+.toggle-btn {
+  cursor: pointer;
+  color: #aaa;
+}
+
+.toggle-content {
+  display: none;
+  margin-top: 10px;
+}
+
+.toggle.open .toggle-content {
+  display: block;
+}
+
+@media (min-width: 768px) {
+  .stock-header { font-size: 26px; }
+  .section-title { font-size: 22px; }
+  .section-title.big { font-size: 26px; }
+}
+</style>
 </head>
 
 <body>
@@ -106,106 +149,117 @@
 <div id="container"></div>
 
 <script>
-  const IMG_FOLDER = "results";
-  const MAX_LOOKBACK_DAYS = 10;
+const IMG_FOLDER = "results";
+const MAX_LOOKBACK_DAYS = 10;
 
-  function mockModelOutput() {
-    return {
-      dir1: 0.45 + Math.random() * 0.3,   // 明日
-      dirN: 0.45 + Math.random() * 0.3    // 趨勢
-    };
-  }
+/* mock（之後可接真實模型輸出） */
+function mockModelOutput() {
+  return {
+    dir1: 0.45 + Math.random() * 0.3,
+    dirN: 0.45 + Math.random() * 0.3
+  };
+}
 
-  const STOCKS = [
-    { ticker: "2301.TW", name: "光寶科" },
-    { ticker: "2408.TW", name: "南亞科" },
-    { ticker: "8110.TW", name: "華東" }
-  ];
+const STOCKS = [
+  { ticker: "2301.TW", name: "光寶科" },
+  { ticker: "2408.TW", name: "南亞科" },
+  { ticker: "8110.TW", name: "華東" }
+];
 
-  function getTWDate(d = new Date()) {
-    const tw = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Taipei" }));
-    return `${tw.getFullYear()}-${String(tw.getMonth()+1).padStart(2,"0")}-${String(tw.getDate()).padStart(2,"0")}`;
-  }
+function getTWDate(d = new Date()) {
+  const tw = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Taipei" }));
+  return `${tw.getFullYear()}-${String(tw.getMonth()+1).padStart(2,"0")}-${String(tw.getDate()).padStart(2,"0")}`;
+}
 
-  function loadImage(src) {
-    return new Promise(res => {
-      const img = new Image();
-      img.onload = () => res(true);
-      img.onerror = () => res(false);
-      img.src = src + "?t=" + Date.now();
-    });
-  }
+function loadImage(src) {
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => res(true);
+    img.onerror = () => res(false);
+    img.src = src + "?t=" + Date.now();
+  });
+}
 
-  async function findLatest(stock) {
-    for (let i=0;i<=MAX_LOOKBACK_DAYS;i++) {
-      const d = new Date();
-      d.setDate(d.getDate()-i);
-      const ds = getTWDate(d);
-      const pred = `${IMG_FOLDER}/${ds}_${stock.ticker}_pred.png`;
-      const back = `${IMG_FOLDER}/${ds}_${stock.ticker}_backtest.png`;
-      if (await loadImage(pred)) {
-        return { date: ds, offset:i, pred, back, backOK: await loadImage(back) };
-      }
+async function findLatest(stock) {
+  for (let i = 0; i <= MAX_LOOKBACK_DAYS; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const ds = getTWDate(d);
+    const pred = `${IMG_FOLDER}/${ds}_${stock.ticker}_pred.png`;
+    const back = `${IMG_FOLDER}/${ds}_${stock.ticker}_backtest.png`;
+    if (await loadImage(pred)) {
+      return { date: ds, offset: i, pred, back, backOK: await loadImage(back) };
     }
-    return null;
   }
+  return null;
+}
 
-  // ✅ 只改「說法」，不改門檻
-  function classify(p, mode) {
-    if (p > 0.55) return ["up", mode==="short" ? "📈 偏多" : "📈 趨勢偏多"];
-    if (p < 0.45) return ["down", mode==="short" ? "📉 偏空" : "📉 趨勢偏空"];
-    return ["neutral", mode==="short" ? "⚠️ 短線震盪" : "⚠️ 趨勢中性"];
-  }
+function classify(p, mode) {
+  if (p > 0.55) return ["up", mode==="short" ? "📈 明日偏多" : "📈 趨勢偏多"];
+  if (p < 0.45) return ["down", mode==="short" ? "📉 明日偏空" : "📉 趨勢偏空"];
+  return ["neutral", mode==="short" ? "⚠️ 明日震盪" : "⚠️ 趨勢中性"];
+}
 
-  async function main() {
-    const c = document.getElementById("container");
+async function main() {
+  const c = document.getElementById("container");
 
-    for (const s of STOCKS) {
-      const found = await findLatest(s);
-      if (!found) continue;
+  for (const s of STOCKS) {
+    const found = await findLatest(s);
+    if (!found) continue;
 
-      const m = mockModelOutput();
-      const [c1, t1] = classify(m.dir1, "short");
-      const [,  t2] = classify(m.dirN, "trend");
-      const conf = Math.round(Math.max(m.dir1, m.dirN) * 100);
+    const m = mockModelOutput();
+    const [c1, t1] = classify(m.dir1, "short");
+    const [, t2] = classify(m.dirN, "trend");
+    const conf = Math.round(Math.max(m.dir1, m.dirN) * 100);
 
-      const block = document.createElement("div");
-      block.className = "stock-block";
-      block.style.borderLeftColor =
-        c1==="up" ? "#4CAF50" : c1==="down" ? "#F44336" : "#FFC107";
+    const block = document.createElement("div");
+    block.className = "stock-block";
+    block.style.borderLeftColor =
+      c1==="up" ? "#4CAF50" : c1==="down" ? "#F44336" : "#FFC107";
 
-      block.innerHTML = `
-        <div class="stock-header">${s.name}（${s.ticker}）｜${found.date}</div>
-        <div class="stock-subhint">${found.offset===0?"（今日）":`（往前 ${found.offset} 天）`}</div>
+    block.innerHTML = `
+      <div class="stock-header">${s.name}（${s.ticker}）｜${found.date}</div>
+      <div class="stock-subhint">${found.offset===0?"（今日）":`（往前 ${found.offset} 天）`}</div>
 
-        <div class="model-summary ${c1}">
-          ${t1}（明日 ${(m.dir1*100).toFixed(0)}%）｜
-          ${t2}（${(m.dirN*100).toFixed(0)}%）
-        </div>
+      <div class="decision-strip ${c1}">
+        👉 ${t1}｜${t2}
+      </div>
 
-        <div class="confidence-bar">
-          <div class="confidence-fill" style="width:${conf}%"></div>
-        </div>
+      <div class="model-summary ${c1}">
+        明日 ${(m.dir1*100).toFixed(0)}% ｜ 趨勢 ${(m.dirN*100).toFixed(0)}%
+      </div>
 
-        <div class="section">
-          <div class="section-title">收盤價＋均線＋模型預測</div>
-          <img src="${found.pred}">
-        </div>
+      <div class="confidence-bar">
+        <div class="confidence-fill" style="width:${conf}%"></div>
+      </div>
 
-        ${found.backOK ? `
-        <div class="section">
-          <div class="section-title big">昨日預測 → 今日實際</div>
+      <div class="section">
+        <div class="section-title">收盤價＋均線＋模型預測</div>
+        <img src="${found.pred}">
+      </div>
+
+      ${found.backOK ? `
+      <div class="section toggle">
+        <div class="section-title big toggle-btn">昨日預測 → 今日實際（點擊展開）</div>
+        <div class="toggle-content">
           <img src="${found.back}">
-        </div>` : ""}
-      `;
+        </div>
+      </div>` : ""}
+    `;
 
-      c.appendChild(block);
-    }
+    c.appendChild(block);
   }
+}
 
-  main();
+document.addEventListener("click", e => {
+  if (e.target.classList.contains("toggle-btn")) {
+    e.target.parentElement.classList.toggle("open");
+  }
+});
+
+main();
 </script>
 
 </body>
 </html>
-<!-- BUILD_TIME Fri Dec 26 04:53:25 UTC 2025 -->
+<!-- BUILD_TIME Fri Dec 26 2025 -->
