@@ -83,17 +83,12 @@ def load_df_from_firestore(ticker, collection="NEW_stock_data_liteon", days=500)
     return df
 
 # ================= 假日補今天 =================
-def ensure_latest_trading_row(df):
+def ensure_today_row(df):
     today = pd.Timestamp(datetime.now().date())
-    last = df.index.max()
-
-    # 補齊中間缺的 BDay（例如 12/25）
-    all_days = pd.bdate_range(last, today)
-
-    for d in all_days[1:]:
-        if d not in df.index:
-            df.loc[d] = df.loc[last]
-
+    last_date = df.index.max()
+    if last_date < today:
+        df.loc[today] = df.loc[last_date]
+        print(f"⚠️ 今日無資料，使用 {last_date.date()} 補今日")
     return df.sort_index()
 
 
@@ -598,7 +593,7 @@ if __name__ == "__main__":
 
     # ---------- Data ----------
     df = load_df_from_firestore(TICKER, collection=COLLECTION, days=500)
-    df = ensure_latest_trading_row(df)
+    df = ensure_today_row((df)
     df = add_features(df)
 
     # ✅ 華東專屬特徵（含 OHLC + 波動/跳空/量能）
