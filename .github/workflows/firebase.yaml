@@ -17,49 +17,65 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ---------------- Checkout ----------------
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # ---------------- Python ----------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      # ---------------- Install deps ----------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install --no-cache-dir -r requirements.txt
 
+      # ---------------- Verify finmind (關鍵防雷) ----------------
+      - name: Verify finmind installed
+        run: |
+          python - << 'EOF'
+import sys
+print("Python:", sys.version)
 
-      # ---------------- 先抓股價 + 技術指標 ----------------
+import finmind
+from finmind.data import DataLoader
+
+print("finmind OK")
+print("finmind version:", finmind.__version__)
+EOF
+
+      # ---------------- 抓股價 + 技術指標 ----------------
       - name: Run stock data collection (catch_stock.py)
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
         run: |
           python catch_stock.py
 
-      #---------------- 再跑 LSTM / 預測 / 繪圖：光寶 ----------------
+      # ---------------- LSTM / 預測 / 繪圖：光寶 ----------------
       - name: Run stock prediction program (Liteon - 2301stock.py)
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
         run: |
           python 2301stock.py
 
-      # ---------------- 再跑 LSTM / 預測 / 繪圖：南亞科 ----------------
+      # ---------------- LSTM / 預測 / 繪圖：南亞科 ----------------
       - name: Run stock prediction program (Nanya - 2408stock.py)
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
         run: |
           python 2408stock.py
 
-      # ---------------- 再跑 LSTM / 預測 / 繪圖：華東 ----------------
+      # ---------------- LSTM / 預測 / 繪圖：華東 ----------------
       - name: Run stock prediction program (Huatung - 8110stock.py)
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
         run: |
           python 8110stock.py
 
-      # ---------------- 讓 HTML 一定更新（關鍵） ----------------
+      # ---------------- 強制更新 HTML ----------------
       - name: Update build time in index.html
         run: |
           if grep -q "BUILD_TIME" index.html; then
@@ -68,13 +84,13 @@ jobs:
             echo "<!-- BUILD_TIME $(date) -->" >> index.html
           fi
 
-      # ---------------- Commit 圖表 + HTML ----------------
+      # ---------------- Commit & Push ----------------
       - name: Commit & push results and html
         run: |
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
-          git add results/*.png
-          git add results/*.csv
+          git add results/*.png || true
+          git add results/*.csv || true
           git add index.html
           git commit -m "Update stock charts and refresh HTML" || echo "No changes to commit"
           git push
