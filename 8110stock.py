@@ -598,7 +598,7 @@ if __name__ == "__main__":
 
     # ---------- Data ----------
     df = load_df_from_firestore(TICKER, collection=COLLECTION, days=500)
-    df = ensure_today_row(df)
+    df = ensure_latest_trading_row(df)
     df = add_features(df)
 
     # ✅ 華東專屬特徵（含 OHLC + 波動/跳空/量能）
