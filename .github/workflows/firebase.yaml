@@ -34,15 +34,15 @@ jobs:
       - name: Verify FinMind
         run: |
           python - << 'EOF'
-import sys
-print("Python:", sys.version)
-
-import finmind
-from finmind.data import DataLoader
-
-print("FinMind OK")
-print("FinMind version:", finmind.__version__)
-EOF
+          import sys
+          print("Python:", sys.version)
+          
+          import finmind
+          from finmind.data import DataLoader
+          
+          print("FinMind OK")
+          print("FinMind version:", finmind.__version__)
+          EOF
 
       # ---------------- 抓股價 + 技術指標 ----------------
       - name: Run stock data collection
