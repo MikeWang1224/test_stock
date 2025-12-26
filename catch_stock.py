@@ -1,17 +1,12 @@
-#catch stock
-
-
 # -*- coding: utf-8 -*-
 """
 個股資料抓取 + 技術指標計算 + Firestore 更新與寫回
-✅ 今日 Close 先覆寫，再重新計算指標（一致性修正版）
-✅ 改1：個股只寫最近 N 天（預設 3 天）
-✅ 改2：指數 / 外生因子只寫最新一天
-不含模型、不含預測、不含繪圖
+Yahoo Finance 穩定修正版（2025）
 """
 
 import os
 import json
+import time
 import firebase_admin
 from firebase_admin import credentials, firestore
 import yfinance as yf
@@ -20,7 +15,7 @@ import numpy as np
 from datetime import datetime
 
 # ================== 參數 ==================
-WRITE_DAYS = 3   # ← 改 1：個股只寫最近 N 天
+WRITE_DAYS = 3
 COLLECTION = "NEW_stock_data_liteon"
 PERIOD = "12mo"
 
@@ -38,8 +33,29 @@ if key_dict:
 else:
     print("⚠️ FIREBASE 未設定，Firestore 寫入將略過")
 
+# ================= Yahoo 安全下載 =================
+def safe_download(ticker, period="12mo", retry=3, sleep_sec=2):
+    for i in range(retry):
+        try:
+            print(f"⬇️ downloading {ticker}")
+            df = yf.download(
+                tickers=ticker,
+                period=period,
+                interval="1d",
+                progress=False,
+                threads=False
+            )
+            if df is not None and len(df) > 0:
+                return df
+        except Exception as e:
+            print(f"⚠️ {ticker} error {i+1}/{retry}: {e}")
+        time.sleep(sleep_sec)
+
+    print(f"❌ {ticker} 無法取得資料")
+    return None
+
 # ================= 技術指標 =================
-def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def add_all_indicators(df):
     df = df.copy()
 
     df["SMA_5"] = df["Close"].rolling(5).mean()
@@ -48,8 +64,8 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["SMA_50"] = df["Close"].rolling(50).mean()
 
     delta = df["Close"].diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
     rs = gain.rolling(20).mean() / loss.rolling(20).mean()
     df["RSI"] = 100 - (100 / (1 + rs))
 
@@ -62,7 +78,6 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     ema12 = df["Close"].ewm(span=12, adjust=False).mean()
     ema26 = df["Close"].ewm(span=26, adjust=False).mean()
     df["MACD"] = ema12 - ema26
-    df["SignalLine"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
     tr = pd.concat([
         df["High"] - df["Low"],
@@ -73,36 +88,19 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     return df.dropna()
 
-# ================= 覆寫今日 Close =================
-def overwrite_today_close(df, ticker):
-    if db is None:
-        return df
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    doc = db.collection(COLLECTION).document(today).get()
-    if doc.exists:
-        payload = doc.to_dict().get(ticker, {})
-        if "Close" in payload:
-            ts = pd.Timestamp(today)
-            if ts in df.index:
-                df.loc[ts, "Close"] = float(payload["Close"])
-                print(f"✔ 覆寫今日 Close {ticker}: {payload['Close']}")
-    return df
-
 # ================= 個股流程 =================
 def fetch_prepare_recalc(ticker):
-    df = yf.Ticker(ticker).history(period=PERIOD)
-    df = overwrite_today_close(df, ticker)
+    df = safe_download(ticker, PERIOD)
+    if df is None or len(df) == 0:
+        return None
     return add_all_indicators(df)
 
 def save_stock_recent_days(df, ticker):
-    if db is None:
+    if db is None or df is None or len(df) == 0:
         return
 
-    df_tail = df.tail(WRITE_DAYS)
     batch = db.batch()
-
-    for idx, row in df_tail.iterrows():
+    for idx, row in df.tail(WRITE_DAYS).iterrows():
         doc_ref = db.collection(COLLECTION).document(idx.strftime("%Y-%m-%d"))
         batch.set(doc_ref, {
             ticker: {
@@ -120,29 +118,26 @@ def save_stock_recent_days(df, ticker):
         }, merge=True)
 
     batch.commit()
-    print(f"🔥 {ticker} 寫入最近 {len(df_tail)} 天")
+    print(f"🔥 {ticker} 寫入完成")
 
-# ================= 指數 / 外生因子（只寫最新一天） =================
+# ================= 指數 / 外生因子 =================
 def save_factor_latest(tickers, alias):
     if db is None:
         return
 
     for tk in tickers:
-        try:
-            df = yf.Ticker(tk).history(period=PERIOD)
-            if len(df) == 0:
-                continue
-            row = df.iloc[-1]
-            date_str = df.index[-1].strftime("%Y-%m-%d")
-
-            db.collection(COLLECTION).document(date_str).set({
-                alias: {"Close": float(row["Close"])}
-            }, merge=True)
-
-            print(f"🔥 {alias} 更新成功（來源 {tk}）")
-            return
-        except Exception:
+        df = safe_download(tk, PERIOD)
+        if df is None or len(df) == 0:
             continue
+
+        row = df.iloc[-1]
+        date_str = df.index[-1].strftime("%Y-%m-%d")
+        db.collection(COLLECTION).document(date_str).set({
+            alias: {"Close": float(row["Close"])}
+        }, merge=True)
+
+        print(f"🔥 {alias} 更新成功（來源 {tk}）")
+        return
 
     print(f"⚠️ {alias} 全部來源失敗")
 
