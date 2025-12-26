@@ -569,7 +569,7 @@ if __name__ == "__main__":
     STOCK_CONFIG = {
         "8110.TW": {
             "LOOKBACK": 40,
-            "STEPS": 5,
+            "STEPS": 7,
             "MAX_DAILY_NORMRET": 3.0,  # normalized return 限幅（2~4 常見）
             "LR": 6e-4,
             "LSTM_UNITS": 64
