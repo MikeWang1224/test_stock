@@ -2,8 +2,10 @@ name: Run Stock Programs (Liteon + Nanya + Huatung)
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   schedule:
+    # 每天 UTC 05:50 = 台灣時間 13:50
     - cron: '50 5 * * *'
   workflow_dispatch:
 
@@ -23,51 +25,49 @@ jobs:
         with:
           python-version: '3.11'
 
-      # ---------------- 安裝套件 ----------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --no-cache-dir -r requirements.txt
-          pip install --no-cache-dir FinMind==1.7.5
+          pip install --no-cache-dir \
+            firebase-admin==6.5.0 \
+            google-cloud-firestore==2.17.0 \
+            yfinance \
+            matplotlib \
+            pandas \
+            numpy \
+            scikit-learn \
+            tensorflow
 
-      # ---------------- 驗證 FinMind（重點） ----------------
-      - name: Verify FinMind
+      # ---------------- 先抓股價 + 技術指標 ----------------
+      - name: Run stock data collection (catch_stock.py)
+        env:
+          FIREBASE: ${{ secrets.FIREBASE }}
         run: |
-          python - << 'EOF'
-          import sys
-          print("Python:", sys.version)
-          
-          import finmind
-          from finmind.data import DataLoader
-          
-          print("FinMind OK")
-          print("FinMind version:", finmind.__version__)
-          EOF
+          python catch_stock.py
 
-      # ---------------- 抓股價 + 技術指標 ----------------
-      - name: Run stock data collection
+      # ---------------- 再跑 LSTM / 預測 / 繪圖：光寶 ----------------
+      - name: Run stock prediction program (Liteon - 2301stock.py)
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
-        run: python catch_stock.py
+        run: |
+          python 2301stock.py
 
-      # ---------------- LSTM / 預測 / 繪圖 ----------------
-      - name: Run Liteon
+      # ---------------- 再跑 LSTM / 預測 / 繪圖：南亞科 ----------------
+      - name: Run stock prediction program (Nanya - 2408stock.py)
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
-        run: python 2301stock.py
+        run: |
+          python 2408stock.py
 
-      - name: Run Nanya
+      # ---------------- 再跑 LSTM / 預測 / 繪圖：華東 ----------------
+      - name: Run stock prediction program (Huatung - 8110stock.py)
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
-        run: python 2408stock.py
+        run: |
+          python 8110stock.py
 
-      - name: Run Huatung
-        env:
-          FIREBASE: ${{ secrets.FIREBASE }}
-        run: python 8110stock.py
-
-      # ---------------- 更新 HTML ----------------
-      - name: Update build time
+      # ---------------- 讓 HTML 一定更新（關鍵） ----------------
+      - name: Update build time in index.html
         run: |
           if grep -q "BUILD_TIME" index.html; then
             sed -i "s|<!-- BUILD_TIME.*-->|<!-- BUILD_TIME $(date) -->|" index.html
@@ -75,11 +75,13 @@ jobs:
             echo "<!-- BUILD_TIME $(date) -->" >> index.html
           fi
 
-      # ---------------- Commit ----------------
-      - name: Commit & push
+      # ---------------- Commit 圖表 + HTML ----------------
+      - name: Commit & push results and html
         run: |
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
-          git add results/*.png results/*.csv index.html
-          git commit -m "Update stock charts and refresh HTML" || echo "No changes"
+          git add results/*.png
+          git add results/*.csv
+          git add index.html
+          git commit -m "Update stock charts and refresh HTML" || echo "No changes to commit"
           git push
