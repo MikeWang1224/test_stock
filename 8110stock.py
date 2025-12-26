@@ -83,13 +83,19 @@ def load_df_from_firestore(ticker, collection="NEW_stock_data_liteon", days=500)
     return df
 
 # ================= 假日補今天 =================
-def ensure_today_row(df):
+def ensure_latest_trading_row(df):
     today = pd.Timestamp(datetime.now().date())
-    last_date = df.index.max()
-    if last_date < today:
-        df.loc[today] = df.loc[last_date]
-        print(f"⚠️ 今日無資料，使用 {last_date.date()} 補今日")
+    last = df.index.max()
+
+    # 補齊中間缺的 BDay（例如 12/25）
+    all_days = pd.bdate_range(last, today)
+
+    for d in all_days[1:]:
+        if d not in df.index:
+            df.loc[d] = df.loc[last]
+
     return df.sort_index()
+
 
 # ================= Feature Engineering（華東專屬） =================
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
