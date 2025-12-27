@@ -230,8 +230,24 @@ def plot_backtest_error(df, ticker):
         print(f"⚠️ 找不到 forecast：{ticker}")
         return
 
-    forecast_files.sort(key=lambda x: x[0], reverse=True)
-    forecast_date, forecast_name = forecast_files[0]
+    last_trading_day = df.index.max()
+    valid = []
+    
+    for d, f in forecast_files:
+        # forecast_date + 1 必須已經有實際資料
+        idx = df.index.get_indexer([d])
+        if idx[0] == -1:
+            continue
+        if idx[0] + 1 < len(df.index):
+            valid.append((d, f))
+    
+    if not valid:
+        print("⚠️ 找不到可回測的 forecast（尚無實際 t+1）")
+        return
+    
+    # 用最近一個「已完成回測條件」的 forecast
+    forecast_date, forecast_name = max(valid, key=lambda x: x[0])
+
     future_df = pd.read_csv(
         os.path.join("results", forecast_name),
         parse_dates=["date"]
