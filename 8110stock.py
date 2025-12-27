@@ -74,39 +74,43 @@ def load_df_from_firestore(
     if db is None:
         raise ValueError("❌ Firestore 未初始化")
 
-    end = pd.Timestamp.today().normalize()
-    start = end - pd.Timedelta(days=days * 2)  # buffer，防假日
-
     rows = []
 
-    query = (
-        db.collection(collection)
-        .where("__name__", ">=", start.strftime("%Y-%m-%d"))
-        .where("__name__", "<=", end.strftime("%Y-%m-%d"))
-    )
-
-    for doc in query.stream():
+    for doc in db.collection(collection).stream():
         p = doc.to_dict().get(ticker)
         if p:
-            rows.append({"date": doc.id, **p})
+            rows.append({
+                "date": doc.id,   # YYYY-MM-DD
+                **p
+            })
 
-    df = pd.DataFrame(rows)
-    if df.empty:
+    if not rows:
         raise ValueError("⚠️ Firestore 無資料")
 
+    df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])
+
+    # ✅ 這裡才是「防假日的第一道門」
     df = (
         df.sort_values("date")
-          .tail(days)
+          .tail(days)          # 只保留最近 N 筆「交易日」
           .set_index("date")
     )
     return df
 
 
+
 # ================= 假日補今天 =================
 def ensure_latest_trading_row(df):
+    """
+    若今天是非交易日，補 row（forward fill）
+    但 Close 不會變，用於「預測 today+1」
+    """
     today = pd.Timestamp(datetime.now().date())
     last = df.index.max()
+
+    if last.normalize() >= today:
+        return df
 
     all_days = pd.bdate_range(last, today)
 
@@ -115,6 +119,7 @@ def ensure_latest_trading_row(df):
             df.loc[d] = df.loc[last]
 
     return df.sort_index()
+
 
 def get_asof_trading_day(df: pd.DataFrame):
     """
