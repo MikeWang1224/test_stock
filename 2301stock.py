@@ -281,13 +281,14 @@ def plot_backtest_error(df, ticker: str, steps=5):
     # 回測 DataFrame
     bt = []
     last_close = float(df.loc[last_hist_date, "Close"])
+    pos = df.index.get_loc(last_hist_date)
+    
     for i, row in enumerate(future_df.itertuples()):
         pred_price = row.Pred_Close
-        actual_idx = df.index.get_loc(last_hist_date)+i+1
-        actual_price = df.iloc[actual_idx]["Close"] if actual_idx < len(df) else np.nan
+        actual_price = df.iloc[pos + i + 1]["Close"] if (pos + i + 1) < len(df) else np.nan
         bt.append({
             "forecast_date": forecast_date.date(),
-            "decision_day": df.index[actual_idx-1] if actual_idx-1 < len(df) else np.nan,
+            "decision_day": df.index[pos + i] if (pos + i) < len(df) else np.nan,
             "close_t": last_close,
             "pred_t1": pred_price,
             "actual_t1": actual_price,
@@ -295,6 +296,7 @@ def plot_backtest_error(df, ticker: str, steps=5):
             "direction_actual": int(np.sign(actual_price - last_close)) if not np.isnan(actual_price) else np.nan
         })
         last_close = actual_price if not np.isnan(actual_price) else pred_price
+
 
     out_csv = f"results/{today:%Y-%m-%d}_{ticker}_backtest.csv"
     pd.DataFrame(bt).to_csv(out_csv, index=False, encoding="utf-8-sig")
