@@ -351,8 +351,15 @@ def plot_backtest_error(df, ticker: str):
         print("⚠️ 找不到 ≤ t 的歷史 forecast，略過回測")
         return
 
-    forecast_files.sort(key=lambda x: x[0], reverse=True)
-    forecast_date, forecast_name = forecast_files[0]
+    forecast_date = asof_date.normalize()
+
+    forecast_name = f"{forecast_date:%Y-%m-%d}_{ticker}_forecast.csv"
+    forecast_csv = os.path.join("results", forecast_name)
+    
+    if not os.path.exists(forecast_csv):
+        print(f"⚠️ 找不到 {forecast_name}，略過回測")
+        return
+
     forecast_csv = os.path.join("results", forecast_name)
 
     print(f"📄 Backtest 使用 forecast：{forecast_name}")
@@ -788,7 +795,7 @@ if __name__ == "__main__":
 
     # ✅ 預測數值輸出 CSV（檔名含 ticker）
     os.makedirs("results", exist_ok=True)
-    forecast_csv = f"results/{datetime.now():%Y-%m-%d}_{TICKER}_forecast.csv"
+    forecast_csv = f"results/{asof_date:%Y-%m-%d}_{TICKER}_forecast.csv"
     future_df.to_csv(forecast_csv, index=False, encoding="utf-8-sig")
 
     # ✅ 圖輸出（內容不動、檔名改含 ticker）
