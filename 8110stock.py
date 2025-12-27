@@ -66,21 +66,42 @@ if key_dict:
     db = firestore.client()
 
 # ================= Firestore 讀取 =================
-def load_df_from_firestore(ticker, collection="NEW_stock_data_liteon", days=500):
+def load_df_from_firestore(
+    ticker,
+    collection="NEW_stock_data_liteon",
+    days=500
+):
+    if db is None:
+        raise ValueError("❌ Firestore 未初始化")
+
+    end = pd.Timestamp.today().normalize()
+    start = end - pd.Timedelta(days=days * 2)  # buffer，防假日
+
     rows = []
-    if db:
-        for doc in db.collection(collection).stream():
-            p = doc.to_dict().get(ticker)
-            if p:
-                rows.append({"date": doc.id, **p})
+
+    query = (
+        db.collection(collection)
+        .where("__name__", ">=", start.strftime("%Y-%m-%d"))
+        .where("__name__", "<=", end.strftime("%Y-%m-%d"))
+    )
+
+    for doc in query.stream():
+        p = doc.to_dict().get(ticker)
+        if p:
+            rows.append({"date": doc.id, **p})
 
     df = pd.DataFrame(rows)
     if df.empty:
         raise ValueError("⚠️ Firestore 無資料")
 
     df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").tail(days).set_index("date")
+    df = (
+        df.sort_values("date")
+          .tail(days)
+          .set_index("date")
+    )
     return df
+
 
 # ================= 假日補今天 =================
 def ensure_latest_trading_row(df):
