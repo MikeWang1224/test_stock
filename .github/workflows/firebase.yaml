@@ -5,7 +5,7 @@ on:
     branches:
       - main
   schedule:
-    # 每天 UTC 05:50 = 台灣時間 13:50
+    # 每天 UTC 05:50 = 台灣時間 14:05
     - cron: '5 6 * * *'
   workflow_dispatch:
 
