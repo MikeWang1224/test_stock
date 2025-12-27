@@ -633,8 +633,13 @@ if __name__ == "__main__":
     df = add_features(df)
 
     FEATURES = [
-        "Close", "Volume", "RSI", "MACD", "K", "D", "ATR_14",
-        "TAIEX", "ELECTRONICS", "USD_TWD", "SOX", "MU_US"
+        "Close",
+        "Volume",
+        "RSI",
+        "MACD",
+        "K",
+        "D",
+        "ATR_14"
     ]
 
 
