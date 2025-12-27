@@ -581,7 +581,11 @@ if __name__ == "__main__":
 
     print(f"📈 {TICKER} 預測方向機率（看漲）: {pred_dir[-1][0]:.2%}")
 
+    #df = ensure_today_row(df)
     asof_date = df.index.max()
+    #asof_date, is_today_trading = get_asof_trading_day(df)
+    
+    print(f"ℹ️ 決策基準日：{asof_date.date()}")
     last_close = float(df.loc[asof_date, "Close"])
 
     prices = []
@@ -605,24 +609,24 @@ if __name__ == "__main__":
 
     # ================= 生成未來交易日（台股實際交易日） =================
     # 從 df index 找到 asof_date 的位置
-    asof_idx = df.index.get_loc(asof_date)
-    future_dates = df.index[asof_idx + 1 : asof_idx + 1 + STEPS]
-    
-    # 若資料不足 STEPS 天，補最後一天（避免報錯）
-    if len(future_dates) < STEPS:
-        last_date = df.index[-1]
-        while len(future_dates) < STEPS:
-            future_dates = future_dates.append(pd.DatetimeIndex([last_date]))
-    
-    future_df["date"] = future_dates
+    from pandas.tseries.offsets import BDay
+
+    # ✅ 正確：用 BusinessDay 生成未來交易日（不依賴 df.index）
+    future_df["date"] = pd.bdate_range(
+        start=asof_date + BDay(1),
+        periods=STEPS
+    )
 
 
 
+
+    forecast_csv = f"results/{asof_date:%Y-%m-%d}_{TICKER}_forecast.csv"
     future_df.to_csv(
-        f"results/{datetime.now():%Y-%m-%d}_{TICKER}_forecast.csv",
+        forecast_csv,
         index=False,
         encoding="utf-8-sig"
     )
+
 
     plot_and_save(df, future_df, TICKER)
     plot_backtest_error(df, TICKER)
