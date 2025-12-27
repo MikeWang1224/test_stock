@@ -316,25 +316,41 @@ def plot_backtest_error(df, ticker: str):
     import os
     import matplotlib.pyplot as plt
     from datetime import datetime
-
+    today = pd.Timestamp(datetime.now().date())
     # === 只保留真實交易日（排除補假日 row）===
     real_df = df[df["Close"].diff().abs() > 1e-9].copy()
 
-    today = pd.Timestamp(datetime.now().date())
 
     if not os.path.exists("results"):
         print("⚠️ 無 results 資料夾，略過回測")
         return
 
     # === 真實交易日決定 t / t+1 ===
-    valid_days = real_df.index[real_df.index < today]
-
+    # realization day
+    # === 用 forecast 檔名反推 decision day ===
+    forecast_files = [
+        f for f in os.listdir("results")
+        if f.endswith(f"_{ticker}_forecast.csv")
+    ]
+    
+    if not forecast_files:
+        print("⚠️ 找不到任何 forecast，略過回測")
+        return
+    
+    forecast_files.sort(reverse=True)
+    forecast_name = forecast_files[0]
+    
+    forecast_date = pd.to_datetime(forecast_name.split("_")[0])
+    
+    # === 用 forecast_date 決定 t / t+1 ===
+    valid_days = real_df.index[real_df.index <= forecast_date]
+    
     if len(valid_days) < 2:
         print("⚠️ 無足夠真實交易日，略過回測")
         return
-
-    t  = valid_days[-2]   # decision day
-    t1 = valid_days[-1]   # realization day
+    
+    t  = valid_days[-1]                 # decision day = forecast_date
+    t1 = real_df.index[real_df.index > t].min()  # 下一個實際交易日
 
     # === 嚴格只讀「t 當天產生的 forecast」===
     forecast_name = f"{t:%Y-%m-%d}_{ticker}_forecast.csv"
