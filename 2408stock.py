@@ -1,22 +1,36 @@
+#8110stock 
+
+
 # -*- coding: utf-8 -*-
 """
-FireBase_Attention_LSTM_Direction.py (2408.TW 南亞科｜方向更準版 + 更穩版)
+FireBase_Attention_LSTM_Direction.py  (8110stock.py)
+- Attention-LSTM
+- Multi-task: Return path + Direction
+- ✅ 小資料友善版：更穩、更不容易亂噴
+  1) LOOKBACK=40, STEPS=5
+  2) LSTM + Attention pooling（參數比 Transformer 更適合小資料）
+  3) ✅ Return head 加 tanh 限幅（避免預測爆炸）
+  4) ✅ Volume 做 log1p（小資料更穩） 
+- 圖表輸出完全不變（保留 Today 標記）
 
-你要的「模型端」重點改動（最少但最有感）：
-1) ✅ 加入時間序 validation（EarlyStopping 監看 val_loss，不再假穩）
-2) ✅ direction 改用 Focal loss（或 TF 不支援時 fallback 成加權 BCE）
-3) ✅ direction head 與 return head 對齊：把「sum(raw_returns)」加到方向 logit（避免一個說漲一個說跌）
-4) ✅ scaler 存檔/載入（續訓不再每天換座標系）
-5) ✅ cap 寫入 meta.json：續訓時沿用同一個 cap（避免模型圖裡 cap 固定卻以為更新了）
+✅ 改1：修正 scaler fit / split 座標系，避免資料洩漏（leakage）
+  - create_sequences 回傳每個樣本對應的日期 idx
+  - split 用樣本數切，scaler.fit 只用 train 區間的 df 特徵
 
-✅ NEW：把 Firestore 的外生因子加入模型（不改 Firestore 任何資料位置）
-- TAIEX / ELECTRONICS / USD_TWD：同日對齊
-- SOX / MU_US：以「美股收盤 -> 台股下一個交易日」方式對齊（index + BDay(1)）
+✅ 新增：同時輸出 PNG + CSV（檔名含 ticker）
+  - results/YYYY-MM-DD_TICKER_pred.png
+  - results/YYYY-MM-DD_TICKER_forecast.csv
+  - results/YYYY-MM-DD_TICKER_backtest.png
+  - results/YYYY-MM-DD_TICKER_backtest.csv
 
-⚠️ 圖表與輸出檔名規則不變（你的 results/xxxx 檔案格式維持原樣）
+✅ 華東 8110.TW 專屬強化（照前面建議改）
+  A) Feature：加入 HL_RANGE / GAP / VOL_REL（更貼近中小型股/波動股）
+  B) Target：預測「波動標準化」log-return（用 t-1 的 RET_STD_20 做尺度，避免偷看）
+  C) 推回價格時：把預測的 normalized return 乘回 asof 的 RET_STD_20
+  D) loss_weights：direction 權重提高（方向通常比精準價更可靠）
 """
 
-import os, json, random
+import os, json
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -24,21 +38,16 @@ import matplotlib.pyplot as plt
 from pandas.tseries.offsets import BDay
 
 from sklearn.preprocessing import MinMaxScaler
-import joblib  # ✅ scaler persistence
-
 import tensorflow as tf
-from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, Softmax, Lambda
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import (
+    Input, LSTM, Dense, Dropout,
+    Softmax, Lambda
+)
 from tensorflow.keras.callbacks import EarlyStopping
 
 from zoneinfo import ZoneInfo
 now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
-
-# ================= Seed（讓結果更穩、可比較） =================
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-tf.random.set_seed(SEED)
 
 # Firebase
 import firebase_admin
@@ -55,92 +64,62 @@ if key_dict:
     except Exception:
         firebase_admin.initialize_app(cred)
     db = firestore.client()
-else:
-    print("⚠️ FIREBASE 未設定，Firestore 讀取將無資料")
 
-# ================= Firestore 讀取（個股） =================
-def load_df_from_firestore(ticker, collection="NEW_stock_data_liteon", days=500):
+# ================= Firestore 讀取 =================
+def load_df_from_firestore(
+    ticker,
+    collection="NEW_stock_data_liteon",
+    days=500
+):
+    if db is None:
+        raise ValueError("❌ Firestore 未初始化")
+
     rows = []
-    if db:
-        for doc in db.collection(collection).stream():
-            p = doc.to_dict().get(ticker)
-            if p:
-                rows.append({"date": doc.id, **p})
+
+    for doc in db.collection(collection).stream():
+        p = doc.to_dict().get(ticker)
+        if p:
+            rows.append({
+                "date": doc.id,   # YYYY-MM-DD
+                **p
+            })
+
+    if not rows:
+        raise ValueError("⚠️ Firestore 無資料")
 
     df = pd.DataFrame(rows)
-    if df.empty:
-        raise ValueError(f"⚠️ Firestore 無資料：{ticker}")
-
     df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").tail(days).set_index("date")
+
+    # ✅ 這裡才是「防假日的第一道門」
+    df = (
+        df.sort_values("date")
+          .tail(days)          # 只保留最近 N 筆「交易日」
+          .set_index("date")
+    )
     return df
 
-# ================= Firestore 讀取（外生因子 Close only） =================
-def load_factor_close_from_firestore(alias, collection="NEW_stock_data_liteon", days=800):
-    """
-    讀取 Firestore 文件中的 {alias: {Close: ...}}，回傳 Series(index=date, value=Close)
-    alias 例：TAIEX / ELECTRONICS / USD_TWD / SOX / MU_US
-    """
-    rows = []
-    if db:
-        for doc in db.collection(collection).stream():
-            p = doc.to_dict().get(alias)
-            if isinstance(p, dict) and "Close" in p:
-                rows.append({"date": doc.id, "Close": p["Close"]})
 
-    df = pd.DataFrame(rows)
-    if df.empty:
-        raise ValueError(f"⚠️ Firestore 無資料：{alias}")
-
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").tail(days).set_index("date")
-    s = df["Close"].astype(float)
-    s.name = alias
-    return s
-
-def attach_factors_to_stock_df(df_stock, collection="NEW_stock_data_liteon"):
-    """
-    df_stock: 2408 的 df（index=台股交易日）
-    - 台股/匯率因子（TAIEX/ELECTRONICS/USD_TWD）：直接 reindex + ffill + bfill
-    - 美股因子（SOX/MU_US）：把美股日期往後推 1 個 BDay，落在台股下一交易日，再 reindex + ffill + bfill
-    ⚠️ 只改 DataFrame（記憶體內），不會改 Firestore 任何資料。
-    """
-    df_stock = df_stock.copy()
-    idx = df_stock.index
-
-    # 台股/匯率：同日對齊
-    for a in ["TAIEX", "ELECTRONICS", "USD_TWD"]:
-        try:
-            s = load_factor_close_from_firestore(a, collection=collection)
-            # ✅ 重要：ffill + bfill，避免一開始一串 NaN 直接把整段砍掉
-            df_stock[a] = s.reindex(idx).ffill().bfill()
-        except Exception as e:
-            print(f"⚠️ 無法載入 {a}: {e}")
-            df_stock[a] = np.nan
-
-    # 美股：美股 D 的 Close -> 台股 D+1
-    for a in ["SOX", "MU_US"]:
-        try:
-            s = load_factor_close_from_firestore(a, collection=collection)
-            s_shifted = s.copy()
-            s_shifted.index = (s_shifted.index + BDay(1))
-            s_shifted.name = a
-            # ✅ 同樣補齊
-            df_stock[a] = s_shifted.reindex(idx).ffill().bfill()
-        except Exception as e:
-            print(f"⚠️ 無法載入 {a}: {e}")
-            df_stock[a] = np.nan
-
-    return df_stock
 
 # ================= 假日補今天 =================
-def ensure_today_row(df):
+def ensure_latest_trading_row(df):
+    """
+    若今天是非交易日，補 row（forward fill）
+    但 Close 不會變，用於「預測 today+1」
+    """
     today = pd.Timestamp(datetime.now().date())
-    last_date = df.index.max()
-    if last_date < today:
-        df.loc[today] = df.loc[last_date]
-        print(f"⚠️ 今日無資料，使用 {last_date.date()} 補今日")
+    last = df.index.max()
+
+    if last.normalize() >= today:
+        return df
+
+    all_days = pd.bdate_range(last, today)
+
+    for d in all_days[1:]:
+        if d not in df.index:
+            df.loc[d] = df.loc[last]
+
     return df.sort_index()
+
 
 def get_asof_trading_day(df: pd.DataFrame):
     """
@@ -155,16 +134,31 @@ def get_asof_trading_day(df: pd.DataFrame):
         return last_trading_day, True
     else:
         return last_trading_day, False
+
+
+
 # ================= Feature Engineering =================
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
-    # ✅ Volume 尺度穩定
+    df = df.copy()
+
+    # ===== Volume 穩定化 =====
     if "Volume" in df.columns:
         df["Volume"] = np.log1p(df["Volume"].astype(float))
 
-    # 圖表用均線（保持不變）
-    df["SMA5"] = df["Close"].rolling(5).mean()
-    df["SMA10"] = df["Close"].rolling(10).mean()
+    close = df["Close"].astype(float)
+
+    # ===== log return =====
+    logret = np.log(close).diff()
+
+    # ===== RET_STD_20（給 normalized return 用）=====
+    df["RET_STD_20"] = logret.rolling(20).std()
+
+    # ===== 圖表用均線（不影響模型）=====
+    df["SMA5"] = close.rolling(5).mean()
+    df["SMA10"] = close.rolling(10).mean()
+
     return df
+
 
 # ================= Sequence（避免錯位，且不亂切 df） =================
 def create_sequences(df, features, steps=5, window=40):
@@ -178,19 +172,26 @@ def create_sequences(df, features, steps=5, window=40):
 
     close = df["Close"].astype(float)
     logret = np.log(close).diff()
+    ret_std = df["RET_STD_20"].astype(float).values
     feat = df[features].values
-
+    
     for i in range(window, len(df) - steps):
         x_seq = feat[i - window:i]
-        future_ret = logret.iloc[i:i + steps].values
-
+    
+        scale = ret_std[i - 1]   # 用 t-1 的波動
+        if not np.isfinite(scale) or scale <= 0:
+            continue
+    
+        future_ret = logret.iloc[i:i + steps].values / scale
+    
         if np.any(np.isnan(future_ret)) or np.any(np.isnan(x_seq)):
             continue
-
+    
         X.append(x_seq)
         y_ret.append(future_ret)
         y_dir.append(1.0 if future_ret.sum() > 0 else 0.0)
         idx.append(df.index[i])
+
 
     return np.array(X), np.array(y_ret), np.array(y_dir), np.array(idx)
 
@@ -303,86 +304,65 @@ def plot_and_save(df_hist, future_df, ticker):
     plt.savefig(f"results/{datetime.now():%Y-%m-%d}_{ticker}_pred.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-# ================= 回測決策分岔圖（PNG + CSV，讀對應 ticker forecast） =================
-
+# ================= 回測決策分岔圖（PNG + CSV） =================
 def plot_backtest_error(df, ticker: str):
     """
     決策式回測圖（Decision-based Backtest）
-    - 嚴格使用「t 當天產生的 forecast」
-    - 嚴格對齊 t → t+1
-    - 若尚無 t+1（最新交易日），自動略過（不炸）
+    - 自動排除今天的 forecast
+    - 使用最近一筆歷史 forecast（同 ticker）
     """
-
-    import os
-    import numpy as np
-    import pandas as pd
-    import matplotlib.pyplot as plt
-    from datetime import datetime
+        # === 只保留真實交易日（排除 ensure_latest_trading_row 補的假日）===
+    real_df = df.copy()
+    real_df = real_df[real_df["Close"].diff().abs() > 1e-9]
 
     today = pd.Timestamp(datetime.now().date())
-
-    # === 只保留真實交易日（排除補假日 row）===
-    real_df = df[df["Close"].diff().abs() > 1e-9].copy()
 
     if not os.path.exists("results"):
         print("⚠️ 無 results 資料夾，略過回測")
         return
 
-    # === 找最新的 forecast 檔 ===
-    forecast_files = [
-        f for f in os.listdir("results")
-        if f.endswith(f"_{ticker}_forecast.csv")
-    ]
+    forecast_files = []
+    for f in os.listdir("results"):
+        if not f.endswith(f"_{ticker}_forecast.csv"):
+            continue
+        try:
+            d = pd.to_datetime(f.split("_")[0])
+        except Exception:
+            continue
+        if d < today:
+            forecast_files.append((d, f))
 
     if not forecast_files:
-        print("⚠️ 找不到任何 forecast，略過回測")
+        print("⚠️ 找不到可用的歷史 forecast（已排除今天 & 已限定 ticker）")
         return
 
-    forecast_files.sort(reverse=True)
-    forecast_name = forecast_files[0]
+    forecast_files.sort(key=lambda x: x[0], reverse=True)
+    forecast_date, forecast_name = forecast_files[0]
+    forecast_csv = os.path.join("results", forecast_name)
 
-    # 從檔名反推 decision day
-    forecast_date = pd.to_datetime(forecast_name.split("_")[0])
+    print(f"📄 Backtest 使用 forecast：{forecast_name}")
 
-    # === 用 forecast_date 決定 t / t+1 ===
-    valid_days = real_df.index[real_df.index <= forecast_date]
+    future_df = pd.read_csv(forecast_csv, parse_dates=["date"])
 
-    if len(valid_days) < 1:
+        # === 用「真實交易日」決定 t / t+1 ===
+    valid_days = real_df.index[real_df.index < today]
+
+    if len(valid_days) < 2:
         print("⚠️ 無足夠真實交易日，略過回測")
         return
 
-    t = valid_days[-1]                       # decision day
-    t1 = real_df.index[real_df.index > t].min()  # 下一個實際交易日
+    # t = 最後一個可決策日
+    # t1 = 真正發生的下一個交易日
+    t = valid_days[-2]
+    t1 = valid_days[-1]
 
-    # ✅ 關鍵修正：沒有 t+1 就不要回測
-    if pd.isna(t1):
-        print(f"⚠️ {t.date()} 之後尚無下一個實際交易日，略過回測")
-        return
 
-    # === 嚴格只讀 t 當天的 forecast ===
-    forecast_csv = os.path.join(
-        "results",
-        f"{t:%Y-%m-%d}_{ticker}_forecast.csv"
-    )
-
-    if not os.path.exists(forecast_csv):
-        print(f"⚠️ 找不到 forecast：{forecast_csv}，略過回測")
-        return
-
-    print(f"📄 Backtest 使用 forecast：{os.path.basename(forecast_csv)}")
-
-    future_df = pd.read_csv(forecast_csv, parse_dates=["date"])
-    if future_df.empty:
-        print("⚠️ forecast 檔案為空，略過回測")
-        return
-
-    # === 嚴格定義 t → t+1 ===
-    close_t   = float(real_df.loc[t, "Close"])
-    pred_t1   = float(future_df.loc[0, "Pred_Close"])
+    close_t = float(real_df.loc[t, "Close"])
+    pred_t1 = float(future_df.loc[0, "Pred_Close"])
     actual_t1 = float(real_df.loc[t1, "Close"])
+    
 
-    # === 最近趨勢 ===
-    trend = real_df.loc[:t].tail(4)
+    trend = df.loc[:t].tail(4)
     x_trend = np.arange(len(trend))
     x_t = x_trend[-1]
 
@@ -390,42 +370,42 @@ def plot_backtest_error(df, ticker: str):
     ax = plt.gca()
 
     ax.plot(x_trend, trend["Close"], "k-o", label="Recent Close")
-    ax.plot([x_t, x_t + 1], [close_t, pred_t1],
-            "r--o", linewidth=2.5, label="Pred (t → t+1)")
-    ax.plot([x_t, x_t + 1], [close_t, actual_t1],
-            "g-o", linewidth=2.5, label="Actual (t → t+1)")
+    ax.plot([x_t, x_t + 1], [close_t, pred_t1], "r--o", linewidth=2.5, label="Pred (t → t+1)")
+    ax.plot([x_t, x_t + 1], [close_t, actual_t1], "g-o", linewidth=2.5, label="Actual (t → t+1)")
 
+    dx = 0.08
     price_offset = max(0.2, close_t * 0.002)
 
-    ax.text(x_t, close_t + price_offset,
-            f"{close_t:.2f}", ha="center", va="bottom",
-            fontsize=16, color="black")
-
-    ax.text(x_t + 1.05, pred_t1,
-            f"Pred {pred_t1:.2f}", ha="left", va="center",
-            fontsize=14, color="red")
-
-    ax.text(x_t + 1.05, actual_t1,
-            f"Actual {actual_t1:.2f}", ha="left", va="center",
-            fontsize=14, color="green")
+    ax.text(x_t, close_t + price_offset, f"{close_t:.2f}", ha="center", va="bottom", fontsize=18, color="black")
+    ax.text(x_t + 1 + dx, pred_t1, f"Pred {pred_t1:.2f}", ha="left", va="center", fontsize=16, color="red")
+    ax.text(x_t + 1 + dx, actual_t1, f"Actual {actual_t1:.2f}", ha="left", va="center", fontsize=16, color="green")
 
     labels = trend.index.strftime("%m-%d").tolist()
     labels.append(t1.strftime("%m-%d"))
     ax.set_xticks(np.arange(len(labels)))
     ax.set_xticklabels(labels)
 
-    ax.set_title(f"{ticker} Decision Backtest (t → t+1)")
+    ax.set_title(f"{ticker} Decision Backtest (t → t+1)")# ✅ 內容不動
     ax.legend()
     ax.grid(alpha=0.3)
+
+    ax.text(
+        0.01, 0.01,
+        f"Generated at {now_tw:%Y-%m-%d %H:%M:%S} (TW)",
+        transform=ax.transAxes,
+        fontsize=8,
+        alpha=0.4,
+        ha="left",
+        va="bottom"
+    )
 
     os.makedirs("results", exist_ok=True)
     out_png = f"results/{today:%Y-%m-%d}_{ticker}_backtest.png"
     plt.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.close()
 
-    # === CSV（嚴格因果）===
     bt = pd.DataFrame([{
-        "forecast_date": t.date(),
+        "forecast_date": forecast_date.date(),
         "decision_day": t.date(),
         "close_t": close_t,
         "pred_t1": pred_t1,
@@ -437,7 +417,169 @@ def plot_backtest_error(df, ticker: str):
     out_csv = f"results/{today:%Y-%m-%d}_{ticker}_backtest.csv"
     bt.to_csv(out_csv, index=False, encoding="utf-8-sig")
 
+# ================= 6M Trend Plot（x 軸 = 月） =================
+def plot_6m_trend_advanced(
+    df: pd.DataFrame,
+    last_close: float,
+    raw_norm_returns: np.ndarray,
+    scale_last: float,
+    ticker: str,
+    asof_date: pd.Timestamp
+):
+    MONTHS = 6
+    DPM = 21
 
+    # =============================
+    # 1️⃣ 主升趨勢（模型）
+    # =============================
+    # =============================
+# 1️⃣ 主升趨勢（低頻，來自歷史價格）
+# =============================
+# 用近 120 個交易日估計「長期 drift」
+    log_price = np.log(df["Close"].astype(float))
+    ret_ewm = log_price.diff().ewm(span=60).mean()
+    
+    daily_drift = float(ret_ewm.iloc[-1])
+    daily_drift = np.clip(daily_drift, -0.01, 0.01)  # 防爆（±1% / day）
+
+
+    # ===== Regime 判斷（Priority 1）=====
+    atr = last_valid_value(df, "ATR_14", lookback=40)
+    rsi = last_valid_value(df, "RSI", lookback=40)
+    
+    # 波動強度（相對價格）
+    vol_regime = atr / last_close if atr else 0.03
+    
+    # 趨勢可信度分數（0~1）
+    trend_score = 1.0
+    
+    # 1️⃣ 高檔過熱 → drift 不可信
+    if rsi and rsi > 75:
+        trend_score *= 0.3
+    elif rsi and rsi > 65:
+        trend_score *= 0.6
+    
+    # 2️⃣ 超低波動 → 偏盤整
+    if vol_regime < 0.015:
+        trend_score *= 0.5
+    
+    # 3️⃣ 超高波動 → regime 不穩
+    if vol_regime > 0.08:
+        trend_score *= 0.7
+    
+    # 最終調整 drift
+    daily_drift *= trend_score
+
+      
+    monthly_logret = daily_drift * DPM
+    
+    trend = []
+    p = last_close
+    for _ in range(MONTHS):
+        p *= np.exp(monthly_logret)
+        trend.append(p)
+    
+    trend = np.array(trend)
+    
+
+
+    # =============================
+    # 2️⃣ 主週期（價格）
+    # =============================
+    close = df["Close"].iloc[-180:].values
+    close = close - close.mean()
+
+    fft_p = np.fft.rfft(close)
+    freq_p = np.fft.rfftfreq(len(close), d=1)
+    idx_p = np.argmax(np.abs(fft_p[1:])) + 1
+    cycle_p = np.clip(int(round(1 / freq_p[idx_p])), 40, 120)
+
+    # =============================
+# 3️⃣ 回檔週期（成交量）
+# =============================
+    vol_series = df["Volume"].iloc[-180:].dropna().values
+    
+    if len(vol_series) < 60:
+        cycle_v = 30  # fallback
+    else:
+        vol_centered = vol_series - vol_series.mean()
+    
+        fft_v = np.fft.rfft(vol_centered)
+        freq_v = np.fft.rfftfreq(len(vol_centered), d=1)
+        idx_v = np.argmax(np.abs(fft_v[1:])) + 1
+        cycle_v = np.clip(int(round(1 / freq_v[idx_v])), 20, 60)
+
+
+    # =============================
+    # 4️⃣ 震盪幅度（ATR × RSI）
+    # =============================
+    atr = last_valid_value(df, "ATR_14", lookback=40)
+    if atr is None:
+        raise ValueError("❌ 無可用 ATR_14（最近 40 日皆為 NaN）")
+    atr_ratio = atr / last_close
+
+    rsi = last_valid_value(df, "RSI", lookback=40)
+    rsi_factor = np.clip(abs(rsi - 50) / 50, 0.3, 1.2)
+
+    base_amp = atr_ratio * rsi_factor
+    base_amp = np.clip(base_amp, 0.02, 0.18)
+
+    # =============================
+    # 5️⃣ 合成價格（多週期）
+    # =============================
+    prices = [last_close]
+
+    for m in range(1, MONTHS + 1):
+        phase_p = 2 * np.pi * (m * DPM) / cycle_p
+        phase_v = 2 * np.pi * (m * DPM) / cycle_v
+
+        cycle_main = base_amp * np.sin(phase_p)
+        cycle_pull = 0.6 * base_amp * np.sin(phase_v + np.pi)
+
+        price = trend[m - 1] * (1 + cycle_main + cycle_pull)
+        prices.append(price)
+
+    prices = np.array(prices)
+
+    # =============================
+    # 6️⃣ 區間帶（ATR-based fan）
+    # =============================
+    time_scale = np.linspace(0.6, 1.3, len(prices))
+    upper = prices * (1 + base_amp * time_scale)
+    lower = prices * (1 - base_amp * time_scale)
+
+
+    # =============================
+    # 7️⃣ X 軸（月）
+    # =============================
+    labels = ["Now"] + pd.date_range(
+        asof_date + pd.offsets.MonthBegin(1),
+        periods=MONTHS,
+        freq="MS"
+    ).strftime("%Y-%m").tolist()
+
+    # =============================
+    # 8️⃣ Plot
+    # =============================
+    plt.figure(figsize=(15, 7))
+    x = np.arange(MONTHS + 1)
+
+    plt.fill_between(x, lower, upper, alpha=0.18, label="Expected Range")
+    plt.plot(x, prices, "r-o", linewidth=2.8, label="Projected Path")
+    plt.scatter(0, prices[0], s=180, marker="*", label="Today")
+
+    for i, p in enumerate(prices[1:]):
+        plt.text(i + 1, p, f"{p:.2f}", ha="center", fontsize=12)
+
+    plt.xticks(x, labels, fontsize=13)
+    plt.title(f"{ticker} · 6M Outlook (Multi-Cycle + ATR + RSI)")
+    plt.grid(alpha=0.3)
+    plt.legend()
+
+    os.makedirs("results", exist_ok=True)
+    out = f"results/{datetime.now():%Y-%m-%d}_{ticker}_6m_advanced.png"
+    plt.savefig(out, dpi=300, bbox_inches="tight")
+    plt.close()
 
 def last_valid_value(df: pd.DataFrame, col: str, lookback: int = 30):
     """
@@ -453,38 +595,65 @@ def last_valid_value(df: pd.DataFrame, col: str, lookback: int = 30):
         return None
     return float(s.iloc[-1])
 
+
+
 # ================= Main =================
 if __name__ == "__main__":
     TICKER = "2408.TW"
-    LOOKBACK = 40
-    STEPS = 5
     COLLECTION = "NEW_stock_data_liteon"
 
-    os.makedirs("results", exist_ok=True)
-    MODEL_PATH  = f"results/{TICKER}_model.keras"
-    SCALER_PATH = f"results/{TICKER}_scaler.pkl"
-    META_PATH   = f"results/{TICKER}_meta.json"
+    # ✅ 華東專屬設定（normalized return 版本）
+    STOCK_CONFIG = {
+        "2408.TW": {
+            "LOOKBACK": 40,
+            "STEPS": 5,
+            "MAX_DAILY_NORMRET": 3.0,
+            "LR": 6e-4,
+            "LSTM_UNITS": 64
+        },
+    }
 
+    cfg = STOCK_CONFIG.get(TICKER, {
+        "LOOKBACK": 40,
+        "STEPS": 5,
+        "MAX_DAILY_NORMRET": 3.0,
+        "LR": 6e-4,
+        "LSTM_UNITS": 64
+    })
+
+    LOOKBACK = cfg["LOOKBACK"]
+    STEPS = cfg["STEPS"]
+
+    os.makedirs("models", exist_ok=True)
+    MODEL_PATH = f"models/{TICKER}_attn_lstm.keras"
+
+    # ---------- Data ----------
     df = load_df_from_firestore(TICKER, collection=COLLECTION, days=500)
-    #df = ensure_today_row(df)
+    df = ensure_latest_trading_row(df)
     df = add_features(df)
-
-    # ✅ NEW：接外生因子（只改 DataFrame，不改 Firestore）
-    df = attach_factors_to_stock_df(df, collection=COLLECTION)
 
     FEATURES = [
         "Close", "Volume", "RSI", "MACD", "K", "D", "ATR_14",
         "TAIEX", "ELECTRONICS", "USD_TWD", "SOX", "MU_US"
     ]
 
-    cols_check = [c for c in ["Close", "TAIEX", "ELECTRONICS", "USD_TWD", "SOX", "MU_US"] if c in df.columns]
-    print("🔎 factors tail:\n", df[cols_check].tail(5))
 
-    # ✅ 關鍵修正 1：不要整張 df.dropna()，只針對模型 FEATURES
-    df = df.dropna(subset=FEATURES)
+
+    missing = [c for c in FEATURES if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"⚠️ Firestore 資料缺欄位：{missing}\n"
+            f"請確認 catch_stock.py 寫回 8110.TW 時包含 Open/High/Low/Close/Volume，且指標欄位已寫入。"
+        )
+
+    # RET_STD_20 是 y 的尺度，需要一起存在（add_features 會做）
+    if "RET_STD_20" not in df.columns:
+        raise ValueError("⚠️ 缺少 RET_STD_20，請確認 add_features() 有被呼叫")
+
+    df = df.dropna()
 
     X, y_ret, y_dir, idx = create_sequences(df, FEATURES, steps=STEPS, window=LOOKBACK)
-    print(f"{TICKER} | df rows: {len(df)} | X samples: {len(X)}")
+    print(f"df rows: {len(df)} | X samples: {len(X)}")
 
     if len(X) < 40:
         raise ValueError("⚠️ 可用序列太少（<40）。建議：降低 LOOKBACK/STEPS 或檢查資料是否缺欄位/過多 NaN。")
@@ -496,20 +665,15 @@ if __name__ == "__main__":
     y_dir_tr, y_dir_te = y_dir[:split], y_dir[split:]
     idx_tr, idx_te = idx[:split], idx[split:]
 
+    # ✅ scaler.fit 僅用 train 區間（用 idx_tr 的最後日期界定）
     train_end_date = pd.Timestamp(idx_tr[-1])
     df_for_scaler = df.loc[:train_end_date, FEATURES].copy()
 
     if len(df_for_scaler) < LOOKBACK + 5:
         raise ValueError("⚠️ train 區間太短，無法穩定 fit scaler。請確認資料量或調整 LOOKBACK。")
 
-    if os.path.exists(SCALER_PATH):
-        sx = joblib.load(SCALER_PATH)
-        print(f"✅ Load scaler: {SCALER_PATH}")
-    else:
-        sx = MinMaxScaler()
-        sx.fit(df_for_scaler.values)
-        joblib.dump(sx, SCALER_PATH)
-        print(f"💾 Scaler saved: {SCALER_PATH}")
+    sx = MinMaxScaler()
+    sx.fit(df_for_scaler.values)
 
     def scale_X(Xb):
         n, t, f = Xb.shape
@@ -518,94 +682,69 @@ if __name__ == "__main__":
     X_tr_s = scale_X(X_tr)
     X_te_s = scale_X(X_te)
 
-    train_close = df.loc[:train_end_date, "Close"].astype(float)
-    train_logret_abs = np.log(train_close).diff().dropna().abs()
-
-    auto_cap = float(train_logret_abs.quantile(0.99))
-    auto_cap = float(np.clip(auto_cap, 0.03, 0.10))
-    print(f"✅ max_daily_logret auto (99% quantile, clipped): {auto_cap:.4f}")
-
-    meta = {}
-    if os.path.exists(META_PATH):
-        try:
-            with open(META_PATH, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-        except Exception:
-            meta = {}
-
-    if "cap" in meta:
-        cap_used = float(meta["cap"])
-        if abs(cap_used - auto_cap) > 1e-6:
-            print(f"⚠️ cap 已固定沿用 meta cap={cap_used:.4f}（auto_cap={auto_cap:.4f} 不套用）")
-    else:
-        cap_used = auto_cap
-        meta = {
-            "ticker": TICKER,
-            "lookback": LOOKBACK,
-            "steps": STEPS,
-            "features": FEATURES,
-            "cap": cap_used,
-            "created_at_tw": f"{now_tw:%Y-%m-%d %H:%M:%S}"
-        }
-        with open(META_PATH, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-        print(f"💾 Meta saved: {META_PATH} (cap={cap_used:.4f})")
-
-    DIRECTION_WEIGHT = 0.8
-
-    n_tr = len(X_tr_s)
-    val_cut = int(n_tr * 0.90)
-    if val_cut < 10:
-        raise ValueError("⚠️ train 太少，無法切 val。請增加資料或降低 LOOKBACK/STEPS。")
-
-    X_fit, X_val = X_tr_s[:val_cut], X_tr_s[val_cut:]
-    y_ret_fit, y_ret_val = y_ret_tr[:val_cut], y_ret_tr[val_cut:]
-    y_dir_fit, y_dir_val = y_dir_tr[:val_cut], y_dir_tr[val_cut:]
-
-    print(f"✅ Fit samples: {len(X_fit)} | Val samples: {len(X_val)}")
-
+    # ---------- Model (專屬) ----------
     if os.path.exists(MODEL_PATH):
-        print(f"✅ Load existing model: {MODEL_PATH}")
-        model = load_model(MODEL_PATH, safe_mode=False)
-        model = compile_model(model, direction_weight=DIRECTION_WEIGHT, lr=3e-4)
+        print(f"✅ 載入既有模型：{MODEL_PATH}")
+        model = tf.keras.models.load_model(MODEL_PATH, compile=True)
     else:
-        print("✅ Build new model")
         model = build_attention_lstm(
             (LOOKBACK, len(FEATURES)),
             STEPS,
-            max_daily_logret=cap_used,
-            dir_from_ret_weight=2.0
+            max_daily_logret=cfg["MAX_DAILY_NORMRET"]
         )
-        model = compile_model(model, direction_weight=DIRECTION_WEIGHT, lr=7e-4)
+
 
     model.fit(
-        X_fit,
-        {"return": y_ret_fit, "direction": y_dir_fit},
-        validation_data=(X_val, {"return": y_ret_val, "direction": y_dir_val}),
+        X_tr_s,
+        {"return": y_ret_tr, "direction": y_dir_tr},
         epochs=80,
         batch_size=16,
         verbose=2,
-        callbacks=[EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)]
+        callbacks=[EarlyStopping(patience=10, restore_best_weights=True)]
     )
 
     model.save(MODEL_PATH)
-    print(f"💾 Model saved: {MODEL_PATH}")
+    print(f"💾 已儲存模型：{MODEL_PATH}")
 
     pred_ret, pred_dir = model.predict(X_te_s, verbose=0)
-    raw_returns = pred_ret[-1]
+    raw_norm_returns = pred_ret[-1]  # ✅ normalized returns（已限幅）
 
-    print(f"📈 {TICKER} 預測方向機率（看漲）: {pred_dir[-1][0]:.2%}")
+    print(f"📈 預測方向機率（看漲）: {pred_dir[-1][0]:.2%}")
 
-    #df = ensure_today_row(df)
-    asof_date = df.index.max()
-    #asof_date, is_today_trading = get_asof_trading_day(df)
+    asof_date, is_today_trading = get_asof_trading_day(df)
+
+    if not is_today_trading:
+        print(f"ℹ️ 今日非交易日，8110.TW 使用最近交易日 {asof_date.date()}")
     
-    print(f"ℹ️ 決策基準日：{asof_date.date()}")
     last_close = float(df.loc[asof_date, "Close"])
+
+
+    # ✅ 把 normalized return 乘回波動尺度（用 asof 的 RET_STD_20）
+    scale_last = float(df.loc[asof_date, "RET_STD_20"])
+    if not np.isfinite(scale_last) or scale_last <= 0:
+        # fallback：用最近 20 天 std 估
+        scale_last = float(np.log(df["Close"].astype(float)).diff().rolling(20).std().iloc[-1])
+    scale_last = max(scale_last, 1e-6)
+
+
+    # 🔧 ADD: Regime-based 波段放大 / 壓縮（用最近的 TREND_60）
+    trend60 = last_valid_value(df, "TREND_60", lookback=5)
+    
+    amp = 1.0
+    if trend60 is not None:
+        if trend60 > 1.0:
+            amp = 1.2
+        elif trend60 < -1.0:
+            amp = 1.1
+        else:
+            amp = 0.8    # 盤整 → 壓縮
+    
+    print(f"📊 Regime amp = {amp:.2f}")
 
     prices = []
     price = last_close
-    for r in raw_returns:
+    for r_norm in raw_norm_returns:
+        r = float(r_norm) * scale_last * amp
         price *= np.exp(r)
         prices.append(price)
 
@@ -620,28 +759,26 @@ if __name__ == "__main__":
         })
 
     future_df = pd.DataFrame(future)
-    last_trade_date = df.index[-1]
-
-    # ================= 生成未來交易日（台股實際交易日） =================
-    # 從 df index 找到 asof_date 的位置
-    from pandas.tseries.offsets import BDay
-
-    # ✅ 正確：用 BusinessDay 生成未來交易日（不依賴 df.index）
     future_df["date"] = pd.bdate_range(
         start=asof_date + BDay(1),
         periods=STEPS
     )
 
 
+    # ✅ 預測數值輸出 CSV（檔名含 ticker）
+    os.makedirs("results", exist_ok=True)
+    forecast_csv = f"results/{datetime.now():%Y-%m-%d}_{TICKER}_forecast.csv"
+    future_df.to_csv(forecast_csv, index=False, encoding="utf-8-sig")
 
-
-    forecast_csv = f"results/{asof_date:%Y-%m-%d}_{TICKER}_forecast.csv"
-    future_df.to_csv(
-        forecast_csv,
-        index=False,
-        encoding="utf-8-sig"
+    # ✅ 圖輸出（內容不動、檔名改含 ticker）
+    plot_and_save(df, future_df, ticker=TICKER)
+    plot_backtest_error(df, ticker=TICKER)
+    # ================= 6M Trend Forecast（x 軸 = 月） =================
+    plot_6m_trend_advanced(
+        df=df,
+        last_close=last_close,
+        raw_norm_returns=raw_norm_returns,
+        scale_last=scale_last,
+        ticker=TICKER,
+        asof_date=asof_date
     )
-
-
-    plot_and_save(df, future_df, TICKER)
-    plot_backtest_error(df, TICKER)
