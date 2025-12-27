@@ -208,107 +208,97 @@ def plot_and_save(df_hist, future_df, ticker: str):
     plt.close()
 
 # ================= 回測決策分岔圖（檔名含 ticker） =================
-def plot_backtest_error(df, ticker: str):
+def plot_backtest_error(df, ticker: str, steps=5):
     today = pd.Timestamp(datetime.now().date())
 
-    if not os.path.exists("results"):
-        print("⚠️ 無 results 資料夾，略過回測")
-        return
-
-    # ✅ 只抓同 ticker 的 forecast：YYYY-MM-DD_TICKER_forecast.csv
+    # 找最近可用的 forecast
     forecast_files = []
     for f in os.listdir("results"):
-        if not f.endswith(f"_{ticker}_forecast.csv"):
-            continue
-        try:
-            d = pd.to_datetime(f.split("_")[0])
-        except Exception:
-            continue
-        if d < today:
-            forecast_files.append((d, f))
-
+        if f.endswith(f"_{ticker}_forecast.csv"):
+            try:
+                d = pd.to_datetime(f.split("_")[0])
+            except:
+                continue
+            if d < today:
+                forecast_files.append((d, f))
     if not forecast_files:
-        print("⚠️ 找不到可用的歷史 forecast（已排除今天 & 已限定 ticker）")
+        print("⚠️ 無可用歷史 forecast")
         return
 
     forecast_files.sort(key=lambda x: x[0], reverse=True)
     forecast_date, forecast_name = forecast_files[0]
     forecast_csv = os.path.join("results", forecast_name)
-
     print(f"📄 Backtest 使用 forecast：{forecast_name}")
 
     future_df = pd.read_csv(forecast_csv, parse_dates=["date"])
 
-    valid_days = df.index[df.index < today]
-    if len(valid_days) < 2:
-        print("⚠️ 無足夠歷史交易日，略過回測")
+    # 確保 df 有足夠歷史
+    valid_days = df.index[df.index < forecast_date]
+    if len(valid_days) < steps:
+        print("⚠️ 歷史交易日不足")
         return
 
-    t = valid_days[-1]
-    t1 = t + BDay(1)
+    # 對齊 t → t+steps
+    last_hist_date = valid_days[-1]
+    last_close = float(df.loc[last_hist_date, "Close"])
 
-    close_t = float(df.loc[t, "Close"])
-    pred_t1 = float(future_df.loc[0, "Pred_Close"])
+    x_trend = np.arange(len(valid_days[-steps:]))
+    trend = df.loc[valid_days[-steps:]]
 
-    if t1 in df.index:
-        actual_t1 = float(df.loc[t1, "Close"])
-    else:
-        actual_t1 = float(df["Close"].iloc[-1])
-
-    trend = df.loc[:t].tail(4)
-    x_trend = np.arange(len(trend))
-    x_t = x_trend[-1]
-
-    plt.figure(figsize=(14, 6))
+    plt.figure(figsize=(14,6))
     ax = plt.gca()
 
+    # 畫最近趨勢
     ax.plot(x_trend, trend["Close"], "k-o", label="Recent Close")
-    ax.plot([x_t, x_t + 1], [close_t, pred_t1], "r--o", linewidth=2.5, label="Pred (t → t+1)")
-    ax.plot([x_t, x_t + 1], [close_t, actual_t1], "g-o", linewidth=2.5, label="Actual (t → t+1)")
 
-    dx = 0.08
-    price_offset = max(0.2, close_t * 0.002)
+    # 畫預測 vs 實際
+    for i, row in enumerate(future_df.itertuples()):
+        pred_price = row.Pred_Close
+        if i < len(df.loc[last_hist_date:].index)-1:
+            actual_price = df.loc[df.index.get_loc(last_hist_date)+i+1, "Close"]
+        else:
+            actual_price = np.nan
+        ax.plot([x_trend[-1]+i, x_trend[-1]+i+1], [last_close, pred_price], "r--o", label="Pred" if i==0 else "")
+        if not np.isnan(actual_price):
+            ax.plot([x_trend[-1]+i, x_trend[-1]+i+1], [last_close, actual_price], "g-o", label="Actual" if i==0 else "")
+        last_close = actual_price if not np.isnan(actual_price) else pred_price
 
-    ax.text(x_t, close_t + price_offset, f"{close_t:.2f}", ha="center", va="bottom", fontsize=18, color="black")
-    ax.text(x_t + 1 + dx, pred_t1, f"Pred {pred_t1:.2f}", ha="left", va="center", fontsize=16, color="red")
-    ax.text(x_t + 1 + dx, actual_t1, f"Actual {actual_t1:.2f}", ha="left", va="center", fontsize=16, color="green")
+    # 標註價格
+    last_close = float(df.loc[last_hist_date, "Close"])
+    ax.text(x_trend[-1], last_close, f"{last_close:.2f}", ha="center", va="bottom", fontsize=14)
+    ax.set_xticks(np.arange(len(trend)+len(future_df)))
+    labels = list(trend.index.strftime("%m-%d")) + list(future_df["date"].dt.strftime("%m-%d"))
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=12)
 
-    labels = trend.index.strftime("%m-%d").tolist()
-    labels.append(t1.strftime("%m-%d"))
-    ax.set_xticks(np.arange(len(labels)))
-    ax.set_xticklabels(labels)
-
-    ax.set_title("2301.TW Decision Backtest (t → t+1)")
+    ax.set_title(f"{ticker} Decision Backtest (t → t+{steps})")
     ax.legend()
     ax.grid(alpha=0.3)
 
-    ax.text(
-        0.01, 0.01,
-        f"Generated at {now_tw:%Y-%m-%d %H:%M:%S} (TW)",
-        transform=ax.transAxes,
-        fontsize=8,
-        alpha=0.4,
-        ha="left",
-        va="bottom"
-    )
-
-    os.makedirs("results", exist_ok=True)
     out_png = f"results/{today:%Y-%m-%d}_{ticker}_backtest.png"
     plt.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.close()
 
-    bt = pd.DataFrame([{
-        "forecast_date": forecast_date.date(),
-        "decision_day": t.date(),
-        "close_t": close_t,
-        "pred_t1": pred_t1,
-        "actual_t1": actual_t1,
-        "direction_pred": int(np.sign(pred_t1 - close_t)),
-        "direction_actual": int(np.sign(actual_t1 - close_t))
-    }])
+    # 回測 DataFrame
+    bt = []
+    last_close = float(df.loc[last_hist_date, "Close"])
+    for i, row in enumerate(future_df.itertuples()):
+        pred_price = row.Pred_Close
+        actual_idx = df.index.get_loc(last_hist_date)+i+1
+        actual_price = df.iloc[actual_idx]["Close"] if actual_idx < len(df) else np.nan
+        bt.append({
+            "forecast_date": forecast_date.date(),
+            "decision_day": df.index[actual_idx-1] if actual_idx-1 < len(df) else np.nan,
+            "close_t": last_close,
+            "pred_t1": pred_price,
+            "actual_t1": actual_price,
+            "direction_pred": int(np.sign(pred_price - last_close)),
+            "direction_actual": int(np.sign(actual_price - last_close)) if not np.isnan(actual_price) else np.nan
+        })
+        last_close = actual_price if not np.isnan(actual_price) else pred_price
 
     out_csv = f"results/{today:%Y-%m-%d}_{ticker}_backtest.csv"
-    bt.to_csv(out_csv, index=False, encoding="utf-8-sig")
+    pd.DataFrame(bt).to_csv(out_csv, index=False, encoding="utf-8-sig")
+
 
 # ================= Main =================
 if __name__ == "__main__":
