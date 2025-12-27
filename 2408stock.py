@@ -306,7 +306,7 @@ def plot_and_save(df_hist, future_df, ticker):
 
 # ================= 回測決策分岔圖（PNG + CSV） =================
 # ================= 回測決策分岔圖（PNG + CSV） =================
-def plot_backtest_error(df, ticker: str):
+def plot_backtest_error(df, ticker: str, asof_date: pd.Timestamp):
     """
     決策式回測圖（Decision-based Backtest）
 
@@ -352,15 +352,16 @@ def plot_backtest_error(df, ticker: str):
         return
 
     forecast_date = asof_date.normalize()
-
     forecast_name = f"{forecast_date:%Y-%m-%d}_{ticker}_forecast.csv"
     forecast_csv = os.path.join("results", forecast_name)
     
     if not os.path.exists(forecast_csv):
         print(f"⚠️ 找不到 {forecast_name}，略過回測")
         return
+    
+    print(f"📄 Backtest 使用 forecast：{forecast_name}")
+    future_df = pd.read_csv(forecast_csv, parse_dates=["date"])
 
-    forecast_csv = os.path.join("results", forecast_name)
 
     print(f"📄 Backtest 使用 forecast：{forecast_name}")
 
@@ -800,7 +801,7 @@ if __name__ == "__main__":
 
     # ✅ 圖輸出（內容不動、檔名改含 ticker）
     plot_and_save(df, future_df, ticker=TICKER)
-    plot_backtest_error(df, ticker=TICKER)
+    plot_backtest_error(df, ticker=TICKER, asof_date=asof_date)
     # ================= 6M Trend Forecast（x 軸 = 月） =================
     plot_6m_trend_advanced(
         df=df,
