@@ -83,13 +83,32 @@ def load_df_from_firestore(ticker, collection="NEW_stock_data_liteon", days=500)
     return df
 
 # ================= 假日補今天 =================
-def ensure_today_row(df):
+def ensure_latest_trading_row(df):
     today = pd.Timestamp(datetime.now().date())
-    last_date = df.index.max()
-    if last_date < today:
-        df.loc[today] = df.loc[last_date]
-        print(f"⚠️ 今日無資料，使用 {last_date.date()} 補今日")
+    last = df.index.max()
+
+    all_days = pd.bdate_range(last, today)
+
+    for d in all_days[1:]:
+        if d not in df.index:
+            df.loc[d] = df.loc[last]
+
     return df.sort_index()
+
+def get_asof_trading_day(df: pd.DataFrame):
+    """
+    回傳 (asof_date, is_today_trading)
+    - 若今天是交易日 → 用今天
+    - 若今天非交易日 → 用最近一個交易日
+    """
+    today = pd.Timestamp(datetime.now().date())
+    last_trading_day = df.index.max()
+
+    if last_trading_day.normalize() == today:
+        return last_trading_day, True
+    else:
+        return last_trading_day, False
+
 
 
 # ================= Feature Engineering（華東專屬） =================
@@ -280,6 +299,9 @@ def plot_backtest_error(df, ticker: str):
     - 自動排除今天的 forecast
     - 使用最近一筆歷史 forecast（同 ticker）
     """
+        # === 只保留真實交易日（排除 ensure_latest_trading_row 補的假日）===
+    real_df = df.copy()
+    real_df = real_df[real_df["Close"].diff().abs() > 1e-9]
 
     today = pd.Timestamp(datetime.now().date())
 
@@ -310,21 +332,23 @@ def plot_backtest_error(df, ticker: str):
 
     future_df = pd.read_csv(forecast_csv, parse_dates=["date"])
 
-    valid_days = df.index[df.index < today]
+        # === 用「真實交易日」決定 t / t+1 ===
+    valid_days = real_df.index[real_df.index < today]
+
     if len(valid_days) < 2:
-        print("⚠️ 無足夠歷史交易日，略過回測")
+        print("⚠️ 無足夠真實交易日，略過回測")
         return
 
-    t = valid_days[-1]
-    t1 = t + BDay(1)
+    # t = 最後一個可決策日
+    # t1 = 真正發生的下一個交易日
+    t = valid_days[-2]
+    t1 = valid_days[-1]
 
-    close_t = float(df.loc[t, "Close"])
+
+    close_t = float(real_df.loc[t, "Close"])
     pred_t1 = float(future_df.loc[0, "Pred_Close"])
-
-    if t1 in df.index:
-        actual_t1 = float(df.loc[t1, "Close"])
-    else:
-        actual_t1 = float(df["Close"].iloc[-1])
+    actual_t1 = float(real_df.loc[t1, "Close"])
+    
 
     trend = df.loc[:t].tail(4)
     x_trend = np.arange(len(trend))
@@ -570,7 +594,7 @@ if __name__ == "__main__":
     STOCK_CONFIG = {
         "8110.TW": {
             "LOOKBACK": 40,
-            "STEPS": 7,
+            "STEPS": 5,
             "MAX_DAILY_NORMRET": 3.0,  # normalized return 限幅（2~4 常見）
             "LR": 6e-4,
             "LSTM_UNITS": 64
@@ -593,7 +617,7 @@ if __name__ == "__main__":
 
     # ---------- Data ----------
     df = load_df_from_firestore(TICKER, collection=COLLECTION, days=500)
-    df = ensure_today_row(df)
+    df = ensure_latest_trading_row(df)
     df = add_features(df)
 
     # ✅ 華東專屬特徵（含 OHLC + 波動/跳空/量能）
@@ -679,8 +703,13 @@ if __name__ == "__main__":
 
     print(f"📈 預測方向機率（看漲）: {pred_dir[-1][0]:.2%}")
 
-    asof_date = df.index.max()
+    asof_date, is_today_trading = get_asof_trading_day(df)
+
+    if not is_today_trading:
+        print(f"ℹ️ 今日非交易日，8110.TW 使用最近交易日 {asof_date.date()}")
+    
     last_close = float(df.loc[asof_date, "Close"])
+
 
     # ✅ 把 normalized return 乘回波動尺度（用 asof 的 RET_STD_20）
     scale_last = float(df.loc[asof_date, "RET_STD_20"])
@@ -723,9 +752,10 @@ if __name__ == "__main__":
 
     future_df = pd.DataFrame(future)
     future_df["date"] = pd.bdate_range(
-        start=df.index.max() + BDay(1),
+        start=asof_date + BDay(1),
         periods=STEPS
     )
+
 
     # ✅ 預測數值輸出 CSV（檔名含 ticker）
     os.makedirs("results", exist_ok=True)
