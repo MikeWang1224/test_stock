@@ -697,7 +697,11 @@ if __name__ == "__main__":
             STEPS,
             max_daily_logret=cfg["MAX_DAILY_NORMRET"]
         )
-
+        model = compile_model(
+          model,
+          direction_weight=0.8,
+          lr=cfg["LR"]
+        )
 
     model.fit(
         X_tr_s,
