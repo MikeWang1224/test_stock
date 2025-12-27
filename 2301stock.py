@@ -208,14 +208,14 @@ def plot_and_save(df_hist, future_df, ticker: str):
     plt.close()
 
 # ================= 回測決策分岔圖（檔名含 ticker） =================
-def plot_backtest_error(df, ticker: str):
-    today = pd.Timestamp(datetime.now().date())
 
+# ================= 回測決策分岔圖（日期嚴格對齊版） =================
+def plot_backtest_error(df, ticker: str):
     if not os.path.exists("results"):
         print("⚠️ 無 results 資料夾，略過回測")
         return
 
-    # ✅ 只抓同 ticker 的 forecast：YYYY-MM-DD_TICKER_forecast.csv
+    # 🔒 只抓同 ticker 的 forecast
     forecast_files = []
     for f in os.listdir("results"):
         if not f.endswith(f"_{ticker}_forecast.csv"):
@@ -224,74 +224,66 @@ def plot_backtest_error(df, ticker: str):
             d = pd.to_datetime(f.split("_")[0])
         except Exception:
             continue
-        if d < today:
-            forecast_files.append((d, f))
+        forecast_files.append((d, f))
 
     if not forecast_files:
-        print("⚠️ 找不到可用的歷史 forecast（已排除今天 & 已限定 ticker）")
+        print("⚠️ 找不到任何 forecast 檔案")
         return
 
+    # 用最近一筆「已可驗證 t+1 的 forecast」
     forecast_files.sort(key=lambda x: x[0], reverse=True)
-    forecast_date, forecast_name = forecast_files[0]
+
+    chosen = None
+    for forecast_date, fname in forecast_files:
+        t = pd.Timestamp(forecast_date)
+        t1 = t + BDay(1)
+
+        if t in df.index and t1 in df.index:
+            chosen = (forecast_date, fname)
+            break
+
+    if chosen is None:
+        print("⚠️ 無任何 forecast 具備可驗證的 t+1，略過回測")
+        return
+
+    forecast_date, forecast_name = chosen
     forecast_csv = os.path.join("results", forecast_name)
-
-    print(f"📄 Backtest 使用 forecast：{forecast_name}")
-
     future_df = pd.read_csv(forecast_csv, parse_dates=["date"])
 
-    valid_days = df.index[df.index < today]
-    if len(valid_days) < 2:
-        print("⚠️ 無足夠歷史交易日，略過回測")
-        return
+    # === 嚴格定義 t / t+1 ===
+    t = pd.Timestamp(forecast_date)
+    t1 = t + BDay(1)
 
-    last_hist_date = valid_days[-1]
-    last_close = float(df.loc[last_hist_date, "Close"])
-    pos = df.index.get_loc(last_hist_date)
+    close_t = float(df.loc[t, "Close"])
+    actual_t1 = float(df.loc[t1, "Close"])
+    pred_t1 = float(future_df.loc[0, "Pred_Close"])
 
-    bt = []
-
-    for i, row in enumerate(future_df.itertuples()):
-        pred_price = row.Pred_Close
-        actual_price = df.iloc[pos + i + 1]["Close"] if (pos + i + 1) < len(df) else np.nan
-
-        bt.append({
-            "forecast_date": forecast_date.date(),
-            "decision_day": df.index[pos + i] if (pos + i) < len(df) else np.nan,
-            "close_t": last_close,
-            "pred_t1": pred_price,
-            "actual_t1": actual_price,
-            "direction_pred": int(np.sign(pred_price - last_close)),
-            "direction_actual": int(np.sign(actual_price - last_close)) if not np.isnan(actual_price) else np.nan
-        })
-
-        # 更新 last_close 以計算下一步 direction
-        last_close = actual_price if not np.isnan(actual_price) else pred_price
-
-    bt_df = pd.DataFrame(bt)
-
-    # 畫圖
-    plt.figure(figsize=(14, 6))
-    ax = plt.gca()
-
-    trend = df.loc[:last_hist_date].tail(4)
+    # === 畫最近走勢（到 t 為止）===
+    trend = df.loc[:t].tail(4)
     x_trend = np.arange(len(trend))
     x_t = x_trend[-1]
 
+    plt.figure(figsize=(14, 6))
+    ax = plt.gca()
+
     ax.plot(x_trend, trend["Close"], "k-o", label="Recent Close")
-    ax.plot([x_t, x_t + 1], [bt_df["close_t"].iloc[0], bt_df["pred_t1"].iloc[0]], "r--o", linewidth=2.5, label="Pred (t → t+1)")
-    ax.plot([x_t, x_t + 1], [bt_df["close_t"].iloc[0], bt_df["actual_t1"].iloc[0]], "g-o", linewidth=2.5, label="Actual (t → t+1)")
+    ax.plot([x_t, x_t + 1], [close_t, pred_t1],
+            "r--o", linewidth=2.5, label="Pred (t → t+1)")
+    ax.plot([x_t, x_t + 1], [close_t, actual_t1],
+            "g-o", linewidth=2.5, label="Actual (t → t+1)")
 
-    # 多步繪圖
-    for i in range(1, len(bt_df)):
-        ax.plot([x_t + i, x_t + i + 1],
-                [bt_df["close_t"].iloc[i], bt_df["pred_t1"].iloc[i]],
-                "r--o", linewidth=2.5)
-        if not np.isnan(bt_df["actual_t1"].iloc[i]):
-            ax.plot([x_t + i, x_t + i + 1],
-                    [bt_df["close_t"].iloc[i], bt_df["actual_t1"].iloc[i]],
-                    "g-o", linewidth=2.5)
+    dx = 0.08
+    price_offset = max(0.2, close_t * 0.002)
 
-    labels = list(trend.index.strftime("%m-%d")) + list(future_df["date"].dt.strftime("%m-%d"))
+    ax.text(x_t, close_t + price_offset, f"{close_t:.2f}",
+            ha="center", va="bottom", fontsize=18, color="black")
+    ax.text(x_t + 1 + dx, pred_t1, f"Pred {pred_t1:.2f}",
+            ha="left", va="center", fontsize=16, color="red")
+    ax.text(x_t + 1 + dx, actual_t1, f"Actual {actual_t1:.2f}",
+            ha="left", va="center", fontsize=16, color="green")
+
+    labels = trend.index.strftime("%m-%d").tolist()
+    labels.append(t1.strftime("%m-%d"))
     ax.set_xticks(np.arange(len(labels)))
     ax.set_xticklabels(labels)
 
@@ -301,7 +293,7 @@ def plot_backtest_error(df, ticker: str):
 
     ax.text(
         0.01, 0.01,
-        f"Generated at {now_tw:%Y-%m-%d %H:%M:%S} (TW)",
+        f"Forecast date = {t.date()} | Generated at {now_tw:%Y-%m-%d %H:%M:%S} (TW)",
         transform=ax.transAxes,
         fontsize=8,
         alpha=0.4,
@@ -310,14 +302,25 @@ def plot_backtest_error(df, ticker: str):
     )
 
     os.makedirs("results", exist_ok=True)
-    out_png = f"results/{today:%Y-%m-%d}_{ticker}_backtest.png"
+    out_png = f"results/{now_tw:%Y-%m-%d}_{ticker}_backtest.png"
     plt.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.close()
 
-    out_csv = f"results/{today:%Y-%m-%d}_{ticker}_backtest.csv"
-    bt_df.to_csv(out_csv, index=False, encoding="utf-8-sig")
+    # === 回測紀錄 ===
+    bt = pd.DataFrame([{
+        "forecast_date": t.date(),
+        "decision_day": t.date(),
+        "close_t": close_t,
+        "pred_t1": pred_t1,
+        "actual_t1": actual_t1,
+        "direction_pred": int(np.sign(pred_t1 - close_t)),
+        "direction_actual": int(np.sign(actual_t1 - close_t))
+    }])
 
-    print(f"✅ Backtest CSV & PNG 已生成: {out_csv}, {out_png}")
+    out_csv = f"results/{now_tw:%Y-%m-%d}_{ticker}_backtest.csv"
+    bt.to_csv(out_csv, index=False, encoding="utf-8-sig")
+
+    print(f"✅ Backtest 完成：{forecast_name}")
 
 
 # ================= Main =================
