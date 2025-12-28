@@ -305,32 +305,54 @@ def plot_and_save(df_hist, future_df, ticker):
     plt.close()
 
 
-def plot_backtest_error(df, ticker: str, asof_date: pd.Timestamp):
+def plot_backtest_error(df: pd.DataFrame, ticker: str, asof_date: pd.Timestamp):
     """
     決策式回測圖（Decision-based Backtest）
-    - 使用 ≤ t 的最近一筆 forecast
-    - t / t+1 為最後兩個「已完成」交易日
-    - 絕不偷看未來
+    - t / t1 取最後兩個「真實交易日」
+    - forecast 檔選 ≤ t 的最近一筆（不偷看）
+    - pred_t1 一定用 future_df 的 date 對齊 t1（避免週末/假日/錯檔位移）
     """
 
-    # === 1️⃣ 只保留真實交易日（排除補假日）===
-    real_df = df.copy()
-    real_df = real_df[real_df["Close"].diff().abs() > 1e-9]
+    # ===== 0) 準備 today / 安全檢查 =====
+    today = pd.Timestamp(datetime.now().date())
 
-    if len(real_df) < 3:
-        print("⚠️ 真實交易日不足，略過回測")
-        return
-
-    # === 2️⃣ 定義 t / t+1 ===
-    valid_days = real_df.index
-    t  = valid_days[-2]   # decision day（昨天）
-    t1 = valid_days[-1]   # actual day（今天已收盤）
-
-    # === 3️⃣ 找 ≤ t 的最近一筆 forecast ===
     if not os.path.exists("results"):
         print("⚠️ 無 results 資料夾，略過回測")
         return
 
+    if len(df) < 5:
+        print("⚠️ df 太短，略過回測")
+        return
+
+    # ===== 1) 只保留真實交易日（排除 ensure_latest_trading_row 補的 row）=====
+    # 你現在 FEATURES 沒有 Open/High/Low，但 Firestore 多半有；若沒有就退回最弱版本
+    real_df = df.copy()
+
+    # 用多欄位判斷「是否為 forward-fill 補的假日」：與前一列完全相同 => 視為補的
+    cand_cols = [c for c in ["Close", "Volume", "RSI", "MACD", "K", "D", "ATR_14"] if c in real_df.columns]
+
+    if len(cand_cols) >= 2:
+        same_as_prev = (real_df[cand_cols].diff().abs().fillna(1.0).sum(axis=1) == 0)
+        # same_as_prev=True 代表跟前一天一模一樣（很可能是補的假日）
+        # 但第一列 diff 是 NaN，我們保留
+        real_df = real_df[~same_as_prev].copy()
+
+    # 再保險：只取 < today 的資料（避免今天還沒收盤被寫進來）
+    real_df = real_df[real_df.index < today]
+
+    if len(real_df) < 3:
+        print("⚠️ 真實交易日不足（<3），略過回測")
+        return
+
+    # ===== 2) 定義 t / t1（最後兩個真實交易日）=====
+    valid_days = real_df.index
+    t  = valid_days[-2]   # decision day
+    t1 = valid_days[-1]   # actual day（下一個已完成交易日）
+
+    close_t   = float(real_df.loc[t, "Close"])
+    actual_t1 = float(real_df.loc[t1, "Close"])
+
+    # ===== 3) 找 ≤ t 的最近一筆 forecast 檔（不偷看）=====
     candidates = []
     for f in os.listdir("results"):
         if not f.endswith(f"_{ticker}_forecast.csv"):
@@ -346,24 +368,28 @@ def plot_backtest_error(df, ticker: str, asof_date: pd.Timestamp):
         print("⚠️ 找不到 ≤ t 的歷史 forecast，略過回測")
         return
 
-    # ⭐ 關鍵：選「最近一筆」
     forecast_date, forecast_name = max(candidates, key=lambda x: x[0])
     forecast_csv = os.path.join("results", forecast_name)
-
-    print(f"📄 Backtest 使用 forecast：{forecast_name}")
+    print(f"📄 Backtest 使用 forecast：{forecast_name}（forecast_date={forecast_date.date()}）")
 
     future_df = pd.read_csv(forecast_csv, parse_dates=["date"])
-
     if future_df.empty:
         print("⚠️ forecast CSV 為空，略過回測")
         return
 
-    # === 4️⃣ 取價格 ===
-    close_t   = float(real_df.loc[t, "Close"])
-    actual_t1 = float(real_df.loc[t1, "Close"])
-    pred_t1   = float(future_df.iloc[0]["Pred_Close"])
+    # ===== 4) ⭐ pred_t1 必須對齊 t1 的日期 =====
+    # t1 是 Timestamp (含時間)，future_df["date"] 通常是午夜
+    t1n = pd.Timestamp(t1).normalize()
+    row = future_df[future_df["date"].dt.normalize() == t1n]
 
-    # === 5️⃣ 畫圖（只用真實交易日）===
+    if row.empty:
+        # fallback：用第一筆，但必須警告你這筆 forecast 不對齊 t1
+        pred_t1 = float(future_df.iloc[0]["Pred_Close"])
+        print(f"⚠️ forecast 內找不到 t1={t1n.date()} 的預測日期；改用 forecast 第1筆 {future_df.iloc[0]['date'].date()} 代替（可能是檔案不匹配）")
+    else:
+        pred_t1 = float(row.iloc[0]["Pred_Close"])
+
+    # ===== 5) 畫圖（只用真實交易日）=====
     trend = real_df.loc[:t].tail(4)
     x_trend = np.arange(len(trend))
     x_t = x_trend[-1]
@@ -380,12 +406,12 @@ def plot_backtest_error(df, ticker: str, asof_date: pd.Timestamp):
     dx = 0.08
     price_offset = max(0.2, close_t * 0.002)
 
-    ax.text(x_t, close_t + price_offset,
-            f"{close_t:.2f}", ha="center", fontsize=16)
-    ax.text(x_t + 1 + dx, pred_t1,
-            f"Pred {pred_t1:.2f}", color="red", fontsize=14)
-    ax.text(x_t + 1 + dx, actual_t1,
-            f"Actual {actual_t1:.2f}", color="green", fontsize=14)
+    ax.text(x_t, close_t + price_offset, f"{close_t:.2f}",
+            ha="center", va="bottom", fontsize=16, color="black")
+    ax.text(x_t + 1 + dx, pred_t1, f"Pred {pred_t1:.2f}",
+            ha="left", va="center", fontsize=14, color="red")
+    ax.text(x_t + 1 + dx, actual_t1, f"Actual {actual_t1:.2f}",
+            ha="left", va="center", fontsize=14, color="green")
 
     labels = trend.index.strftime("%m-%d").tolist()
     labels.append(t1.strftime("%m-%d"))
@@ -396,12 +422,23 @@ def plot_backtest_error(df, ticker: str, asof_date: pd.Timestamp):
     ax.legend()
     ax.grid(alpha=0.3)
 
+    ax.text(
+        0.01, 0.01,
+        f"Generated at {now_tw:%Y-%m-%d %H:%M:%S} (TW)\n"
+        f"t={t.date()}  t1={t1.date()}  forecast_date={forecast_date.date()}",
+        transform=ax.transAxes,
+        fontsize=8,
+        alpha=0.45,
+        ha="left",
+        va="bottom"
+    )
+
     os.makedirs("results", exist_ok=True)
     out_png = f"results/{t1:%Y-%m-%d}_{ticker}_backtest.png"
     plt.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.close()
 
-    # === 6️⃣ CSV ===
+    # ===== 6) CSV 輸出 =====
     bt = pd.DataFrame([{
         "forecast_date": forecast_date.date(),
         "decision_day": t.date(),
@@ -410,13 +447,15 @@ def plot_backtest_error(df, ticker: str, asof_date: pd.Timestamp):
         "pred_t1": pred_t1,
         "actual_t1": actual_t1,
         "direction_pred": int(np.sign(pred_t1 - close_t)),
-        "direction_actual": int(np.sign(actual_t1 - close_t))
+        "direction_actual": int(np.sign(actual_t1 - close_t)),
+        "pred_date_used": (row.iloc[0]["date"].date() if not row.empty else future_df.iloc[0]["date"].date())
     }])
 
     out_csv = f"results/{t1:%Y-%m-%d}_{ticker}_backtest.csv"
     bt.to_csv(out_csv, index=False, encoding="utf-8-sig")
 
-    print(f"✅ Backtest 輸出完成：{out_png}")
+    print(f"✅ Backtest 輸出完成：{out_png} / {out_csv}")
+
 
 # ================= 6M Trend Plot（x 軸 = 月） =================
 def plot_6m_trend_advanced(
