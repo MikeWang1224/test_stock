@@ -584,7 +584,15 @@ def plot_6m_trend_advanced(
     # ✅ 物理約束：月 drift 不可超過「波動尺度的幾倍」
     # 常見合理上限：~ 1.2~1.6 * ATR% * sqrt(21)
     vol_cap = float(1.35 * atr_ratio * np.sqrt(DPM))
-    vol_cap = float(np.clip(vol_cap, 0.03, 0.25))  # 8110 保守些：月最大約 3%~25%（log）
+
+    # ✅ RSI 過熱：月趨勢上限縮小（更像真實）
+    if rsi > 75:
+        vol_cap *= 0.55
+    elif rsi > 65:
+        vol_cap *= 0.75
+    
+    vol_cap = float(np.clip(vol_cap, 0.03, 0.18))  # 上限從 0.25 收到 0.18
+      # 8110 保守些：月最大約 3%~25%（log）
     monthly_logret = float(np.clip(monthly_logret, -vol_cap, vol_cap))
 
     model_1m_price = float(last_close * np.exp(monthly_logret))
@@ -640,6 +648,9 @@ def plot_6m_trend_advanced(
 
     base_amp = float(np.clip(atr_ratio * rsi_factor, 0.02, 0.18))
     base_amp = float(np.clip(base_amp * float(amp), 0.02, 0.22))
+        # 🔥 8110 專屬：RSI 極度過熱時，再壓一次震盪幅度（避免過熱還畫大浪往上）
+    if rsi > 75:
+        base_amp *= 0.75
 
     # -----------------------------
     # 6) baseline trend（純 drift 路徑）
