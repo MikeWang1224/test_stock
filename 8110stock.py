@@ -178,16 +178,22 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ================= Sequence（標準化 return，避免波動 regime 影響） =================
-def create_sequences(df, features, steps=5, window=40, eps=1e-9):
+def create_sequences(
+    df, features,
+    steps=5, window=40,
+    trend_h=20,           # ✅ 新增：趨勢 horizon（交易日）
+    k_flat=0.8,           # ✅ 新增：盤整門檻（越大越保守）
+    eps=1e-9
+):
     """
     X: t-window ~ t-1
-    y_ret: t ~ t+steps-1 的「normalized log return」
-           normalized = logret / (RET_STD_20 at t-1)
-           ✅ 用 t-1 的波動當尺度，避免偷看（no leakage）
-    y_dir: 未來 steps 天累積方向（用 raw logret 判斷）
-    idx: 每個樣本對應的「t 當天日期」
+    y_ret: t ~ t+steps-1 normalized log return (用 t-1 波動做尺度)
+    y_dir: 未來 steps 天累積方向（二分類，保留給短線）
+    y_trend3: 未來 trend_h 天趨勢（三分類 Up/Flat/Down）✅ 更貼近真實
+      - 用波動門檻：|cumret| < k_flat * scale * sqrt(trend_h) => Flat
+    idx: 每個樣本對應 t 當天日期
     """
-    X, y_ret, y_dir, idx = [], [], [], []
+    X, y_ret, y_dir, y_trend3, idx = [], [], [], [], []
 
     close = df["Close"].astype(float)
     logret = np.log(close).diff()
@@ -197,34 +203,70 @@ def create_sequences(df, features, steps=5, window=40, eps=1e-9):
 
     feat = df[features].values
 
-    for i in range(window, len(df) - steps):
-        x_seq = feat[i - window:i]
+    # 需要同時滿足 steps 與 trend_h 的未來資料
+    max_h = max(steps, trend_h)
 
-        future_ret_raw = logret.iloc[i:i + steps].values
-        if np.any(np.isnan(future_ret_raw)) or np.any(np.isnan(x_seq)):
+    for i in range(window, len(df) - max_h):
+        x_seq = feat[i - window:i]
+        if np.any(np.isnan(x_seq)):
             continue
 
-        # ✅ 用 t-1 的波動尺度（避免偷看 t 的資訊）
+        # ✅ 用 t-1 波動尺度（避免偷看）
         scale = df["RET_STD_20"].iloc[i - 1]
         if pd.isna(scale) or scale < eps:
             continue
+        scale = float(scale) + eps
 
-        future_ret_norm = future_ret_raw / (float(scale) + eps)
+        # ---------- 5D return head ----------
+        future_ret_raw_5d = logret.iloc[i:i + steps].values
+        if np.any(np.isnan(future_ret_raw_5d)):
+            continue
+        future_ret_norm_5d = future_ret_raw_5d / scale
+
+        # 短線方向（二分類，保留）
+        dir_5d = 1.0 if future_ret_raw_5d.sum() > 0 else 0.0
+
+        # ---------- 20D trend head (3-class) ----------
+        future_ret_raw_tr = logret.iloc[i:i + trend_h].values
+        if np.any(np.isnan(future_ret_raw_tr)):
+            continue
+
+        cum = float(future_ret_raw_tr.sum())  # log累積
+        # ✅ 盤整門檻：波動 * sqrt(h)
+        thr = float(k_flat) * scale * np.sqrt(float(trend_h))
+
+        # class: 0=Down, 1=Flat, 2=Up
+        if cum > thr:
+            cls = 2
+        elif cum < -thr:
+            cls = 0
+        else:
+            cls = 1
+
+        onehot = np.zeros(3, dtype=np.float32)
+        onehot[cls] = 1.0
 
         X.append(x_seq)
-        y_ret.append(future_ret_norm)
-        y_dir.append(1.0 if future_ret_raw.sum() > 0 else 0.0)
+        y_ret.append(future_ret_norm_5d)
+        y_dir.append(dir_5d)
+        y_trend3.append(onehot)
         idx.append(df.index[i])
 
-    return np.array(X), np.array(y_ret), np.array(y_dir), np.array(idx)
+    return (
+        np.array(X),
+        np.array(y_ret),
+        np.array(y_dir),
+        np.array(y_trend3),
+        np.array(idx)
+    )
 
-# ================= Attention-LSTM（✅ return 限幅 + direction 權重提高） =================
-def build_attention_lstm(input_shape, steps, max_daily_normret=3.0, learning_rate=6e-4, lstm_units=64):
-    """
-    max_daily_normret：限制「normalized」單日幅度，避免連乘爆炸
-    - 因為現在 y 是 normalized return，所以限幅應該用「倍數」而不是 0.06 這種絕對值
-    常見合理範圍：2 ~ 4
-    """
+def build_attention_lstm(
+    input_shape,
+    steps,
+    max_daily_normret=3.0,
+    learning_rate=6e-4,
+    lstm_units=64
+):
     inp = Input(shape=input_shape)
 
     x = LSTM(lstm_units, return_sequences=True)(inp)
@@ -239,24 +281,33 @@ def build_attention_lstm(input_shape, steps, max_daily_normret=3.0, learning_rat
     raw = Dense(steps, activation="tanh")(context)           # [-1, 1]
     out_ret = Lambda(lambda t: t * max_daily_normret, name="return")(raw)
 
+    # ✅ 5D direction（短線）
     out_dir = Dense(1, activation="sigmoid", name="direction")(context)
 
-    model = Model(inp, [out_ret, out_dir])
+    # ✅ 20D trend（三分類：Down/Flat/Up）→ 更貼近真實
+    out_trend = Dense(3, activation="softmax", name="trend3")(context)
+
+    model = Model(inp, [out_ret, out_dir, out_trend])
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
         loss={
             "return": tf.keras.losses.Huber(),
-            "direction": "binary_crossentropy"
+            "direction": "binary_crossentropy",
+            "trend3": "categorical_crossentropy"
         },
-        # ✅ 華東：方向更重要一些
+        # ✅ 趨勢比短線方向更重要（更貼近真實）
         loss_weights={
             "return": 1.0,
-            "direction": 0.8
+            "direction": 0.4,
+            "trend3": 1.2
         },
         metrics={
             "direction": [
                 tf.keras.metrics.BinaryAccuracy(name="acc"),
                 tf.keras.metrics.AUC(name="auc")
+            ],
+            "trend3": [
+                tf.keras.metrics.CategoricalAccuracy(name="acc")
             ]
         }
     )
@@ -710,6 +761,7 @@ def last_valid_value(df: pd.DataFrame, col: str, lookback: int = 30):
 
 
 # ================= Main =================
+# ================= Main =================
 if __name__ == "__main__":
     TICKER = "8110.TW"
     COLLECTION = "NEW_stock_data_liteon"
@@ -718,8 +770,8 @@ if __name__ == "__main__":
     STOCK_CONFIG = {
         "8110.TW": {
             "LOOKBACK": 40,
-            "STEPS": 5,
-            "MAX_DAILY_NORMRET": 3.0,  # normalized return 限幅（2~4 常見）
+            "STEPS": 5,                 # 5日：return head 用
+            "MAX_DAILY_NORMRET": 3.0,   # normalized return 限幅（2~4 常見）
             "LR": 6e-4,
             "LSTM_UNITS": 64
         },
@@ -736,6 +788,10 @@ if __name__ == "__main__":
     LOOKBACK = cfg["LOOKBACK"]
     STEPS = cfg["STEPS"]
 
+    # ✅ 趨勢 head 設定（最有感）
+    TREND_H = 20      # 20 交易日 ≈ 1 個月趨勢
+    K_FLAT  = 0.8     # 盤整門檻（0.6~1.2；越大越保守）
+
     os.makedirs("models", exist_ok=True)
     MODEL_PATH = f"models/{TICKER}_attn_lstm.keras"
 
@@ -749,10 +805,9 @@ if __name__ == "__main__":
         "Close", "Open", "High", "Low",
         "Volume", "RSI", "MACD", "K", "D", "ATR_14",
         "HL_RANGE", "GAP", "VOL_REL",
-        "TREND_60",          # 🔧 ADD
-        "TREND_SLOPE_20"     # 🔧 ADD
+        "TREND_60",
+        "TREND_SLOPE_20"
     ]
-
 
     missing = [c for c in FEATURES if c not in df.columns]
     if missing:
@@ -761,30 +816,37 @@ if __name__ == "__main__":
             f"請確認 catch_stock.py 寫回 8110.TW 時包含 Open/High/Low/Close/Volume，且指標欄位已寫入。"
         )
 
-    # RET_STD_20 是 y 的尺度，需要一起存在（add_features 會做）
     if "RET_STD_20" not in df.columns:
         raise ValueError("⚠️ 缺少 RET_STD_20，請確認 add_features() 有被呼叫")
 
     df = df.dropna()
 
-    X, y_ret, y_dir, idx = create_sequences(df, FEATURES, steps=STEPS, window=LOOKBACK)
+    # ✅ create_sequences：會回傳 y_trend3（3類趨勢）
+    X, y_ret, y_dir, y_trend3, idx = create_sequences(
+        df, FEATURES,
+        steps=STEPS,
+        window=LOOKBACK,
+        trend_h=TREND_H,
+        k_flat=K_FLAT
+    )
     print(f"df rows: {len(df)} | X samples: {len(X)}")
 
-    if len(X) < 40:
-        raise ValueError("⚠️ 可用序列太少（<40）。建議：降低 LOOKBACK/STEPS 或檢查資料是否缺欄位/過多 NaN。")
+    if len(X) < 60:
+        raise ValueError("⚠️ 可用序列太少（<60）。建議：降低 LOOKBACK 或增加 days/檢查 NaN。")
 
+    # ---------- Time-series split ----------
     split = int(len(X) * 0.85)
+    X_tr, X_va = X[:split], X[split:]
+    y_ret_tr, y_ret_va = y_ret[:split], y_ret[split:]
+    y_dir_tr, y_dir_va = y_dir[:split], y_dir[split:]
+    y_tr3_tr, y_tr3_va = y_trend3[:split], y_trend3[split:]
+    idx_tr, idx_va = idx[:split], idx[split:]
 
-    X_tr, X_te = X[:split], X[split:]
-    y_ret_tr, y_ret_te = y_ret[:split], y_ret[split:]
-    y_dir_tr, y_dir_te = y_dir[:split], y_dir[split:]
-    idx_tr, idx_te = idx[:split], idx[split:]
-
-    # ✅ scaler.fit 僅用 train 區間（用 idx_tr 的最後日期界定）
+    # ✅ scaler.fit 僅用 train 區間（避免 leakage）
     train_end_date = pd.Timestamp(idx_tr[-1])
     df_for_scaler = df.loc[:train_end_date, FEATURES].copy()
 
-    if len(df_for_scaler) < LOOKBACK + 5:
+    if len(df_for_scaler) < LOOKBACK + max(STEPS, TREND_H) + 5:
         raise ValueError("⚠️ train 區間太短，無法穩定 fit scaler。請確認資料量或調整 LOOKBACK。")
 
     sx = MinMaxScaler()
@@ -795,9 +857,9 @@ if __name__ == "__main__":
         return sx.transform(Xb.reshape(-1, f)).reshape(n, t, f)
 
     X_tr_s = scale_X(X_tr)
-    X_te_s = scale_X(X_te)
+    X_va_s = scale_X(X_va)
 
-    # ---------- Model (專屬) ----------
+    # ---------- Model ----------
     if os.path.exists(MODEL_PATH):
         print(f"✅ 載入既有模型：{MODEL_PATH}")
         model = tf.keras.models.load_model(MODEL_PATH, compile=True)
@@ -810,57 +872,63 @@ if __name__ == "__main__":
             lstm_units=cfg["LSTM_UNITS"]
         )
 
+    # ✅ 真正時間序列 validation（最後 15%）
     model.fit(
         X_tr_s,
-        {"return": y_ret_tr, "direction": y_dir_tr},
-        epochs=80,
+        {"return": y_ret_tr, "direction": y_dir_tr, "trend3": y_tr3_tr},
+        validation_data=(X_va_s, {"return": y_ret_va, "direction": y_dir_va, "trend3": y_tr3_va}),
+        epochs=120,
         batch_size=16,
         verbose=2,
-        callbacks=[EarlyStopping(patience=10, restore_best_weights=True)]
+        callbacks=[EarlyStopping(monitor="val_loss", patience=12, restore_best_weights=True)]
     )
 
     model.save(MODEL_PATH)
     print(f"💾 已儲存模型：{MODEL_PATH}")
 
-    pred_ret, pred_dir = model.predict(X_te_s, verbose=0)
-    raw_norm_returns = pred_ret[-1]  # ✅ normalized returns（已限幅）
+    # ---------- Predict (use validation tail as "latest unseen") ----------
+    pred_ret, pred_dir, pred_tr3 = model.predict(X_va_s, verbose=0)
 
-    print(f"📈 預測方向機率（看漲）: {pred_dir[-1][0]:.2%}")
+    raw_norm_returns = pred_ret[-1]         # 5日 normalized return（已限幅）
+    p_dir = float(pred_dir[-1][0])          # 5日看漲機率
+    p_tr = pred_tr3[-1].astype(float)       # 20日趨勢三類 [Down, Flat, Up]
+    trend_label = ["Down", "Flat", "Up"][int(np.argmax(p_tr))]
 
+    print(f"📈 5D 看漲機率: {p_dir:.2%}")
+    print(f"📌 20D 趨勢: {trend_label} | P(Down/Flat/Up) = {p_tr[0]:.2f}/{p_tr[1]:.2f}/{p_tr[2]:.2f}")
+
+    # ---------- Asof date ----------
     asof_date, is_today_trading = get_asof_trading_day(df)
-
     if not is_today_trading:
-        print(f"ℹ️ 今日非交易日，8110.TW 使用最近交易日 {asof_date.date()}")
-    
-    last_close = float(df.loc[asof_date, "Close"])
+        print(f"ℹ️ 今日非交易日，{TICKER} 使用最近交易日 {asof_date.date()}")
 
+    last_close = float(df.loc[asof_date, "Close"])
 
     # ✅ 把 normalized return 乘回波動尺度（用 asof 的 RET_STD_20）
     scale_last = float(df.loc[asof_date, "RET_STD_20"])
     if not np.isfinite(scale_last) or scale_last <= 0:
-        # fallback：用最近 20 天 std 估
         scale_last = float(np.log(df["Close"].astype(float)).diff().rolling(20).std().iloc[-1])
     scale_last = max(scale_last, 1e-6)
 
-
-    # 🔧 ADD: Regime-based 波段放大 / 壓縮（用最近的 TREND_60）
+    # 🔧 Regime-based amp（保留給 6M 週期震盪用）
     trend60 = last_valid_value(df, "TREND_60", lookback=5)
-    
     amp = 1.0
     if trend60 is not None:
         if trend60 > 1.0:
-            amp = 1.4      # 強趨勢 → 放大
+            amp = 1.4
         elif trend60 < -1.0:
-            amp = 1.3      # 強空趨勢
+            amp = 1.3
         elif abs(trend60) < 0.5:
-            amp = 0.6      # 盤整 → 壓縮
-    
+            amp = 0.6
+
     print(f"📊 Regime amp = {amp:.2f}")
 
+    # ---------- 5D price projection ----------
+    # ✅ 最有感修正：5日推回價格不要乘 amp（避免放大噪音）
     prices = []
     price = last_close
     for r_norm in raw_norm_returns:
-        r = float(r_norm) * scale_last * amp
+        r = float(r_norm) * scale_last
         price *= np.exp(r)
         prices.append(price)
 
@@ -880,21 +948,19 @@ if __name__ == "__main__":
         periods=STEPS
     )
 
-
     # ✅ 預測數值輸出 CSV（檔名含 ticker）
     os.makedirs("results", exist_ok=True)
     forecast_csv = f"results/{datetime.now():%Y-%m-%d}_{TICKER}_forecast.csv"
     future_df.to_csv(forecast_csv, index=False, encoding="utf-8-sig")
 
-    # ✅ 圖輸出（內容不動、檔名改含 ticker）
+    # ✅ 圖輸出（內容不動、檔名含 ticker）
     plot_and_save(df, future_df, ticker=TICKER)
     plot_backtest_error(df, ticker=TICKER)
-    # ================= 6M Trend Forecast（x 軸 = 月） =================
-    pred_ret, pred_dir = model.predict(X_te_s, verbose=0)
-    raw_norm_returns = pred_ret[-1]
-    pred_dir_last = float(pred_dir[-1][0])
-    
-    # ================= 6M Trend Forecast（更貼近現實版） =================
+
+    # ---------- 6M Outlook (advanced) ----------
+    # 用最後一筆方向機率做 conf（你原本設計）
+    pred_dir_last = float(p_dir)
+
     plot_6m_trend_advanced(
         df=df,
         last_close=last_close,
@@ -903,9 +969,7 @@ if __name__ == "__main__":
         ticker=TICKER,
         asof_date=asof_date,
         amp=amp,
-        pred_ret_all=pred_ret,
+        pred_ret_all=pred_ret,          # ✅ 可用 ensemble
         pred_dir_last=pred_dir_last,
         k_ens=20
     )
-    
-        
