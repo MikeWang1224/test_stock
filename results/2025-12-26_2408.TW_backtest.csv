@@ -1,2 +1,2 @@
-﻿forecast_date,decision_day,close_t,pred_t1,actual_t1,direction_pred,direction_actual
-2025-12-25,2025-12-25,189.0,189.7261657714844,189.0,1,0
+﻿forecast_date,decision_day,actual_day,close_t,pred_t1,actual_t1,direction_pred,direction_actual,pred_date_used
+2025-12-24,2025-12-24,2025-12-26,189.0,196.3799743652344,189.0,1,0,2025-12-26
