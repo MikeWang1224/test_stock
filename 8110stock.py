@@ -362,7 +362,7 @@ def plot_and_save(df_hist, future_df, ticker: str):
     ax.set_xticks(np.arange(len(all_dates)))
     ax.set_xticklabels(all_dates, rotation=45, ha="right", fontsize=15)
     ax.legend()
-    ax.set_title("2301.TW Attention-LSTM 預測")  # ✅ 內容不動
+    ax.set_title(f"{ticker} Attention-LSTM 預測") # ✅ 內容不動
 
     os.makedirs("results", exist_ok=True)
     out_png = f"results/{datetime.now():%Y-%m-%d}_{ticker}_pred.png"
@@ -450,7 +450,7 @@ def plot_backtest_error(df, ticker: str):
     ax.set_xticks(np.arange(len(labels)))
     ax.set_xticklabels(labels)
 
-    ax.set_title("2301.TW Decision Backtest (t → t+1)")  # ✅ 內容不動
+    ax.set_title(f"{ticker} Decision Backtest (t → t+1)")  # ✅ 內容不動
     ax.legend()
     ax.grid(alpha=0.3)
 
