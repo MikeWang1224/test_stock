@@ -432,97 +432,126 @@ def plot_backtest_error(df, ticker: str):
     bt.to_csv(out_csv, index=False, encoding="utf-8-sig")
 
 # ================= 6M Trend Plot（x 軸 = 月） =================
+# ================= 6M Trend Plot（x 軸 = 月） =================
 def plot_6m_trend_advanced(
     df: pd.DataFrame,
     last_close: float,
     raw_norm_returns: np.ndarray,
     scale_last: float,
     ticker: str,
-    asof_date: pd.Timestamp
+    asof_date: pd.Timestamp,
+    amp: float = 1.0
 ):
     MONTHS = 6
-    DPM = 21
+    DPM = 21  # trading days per month
 
     # =============================
-    # 1️⃣ 主升趨勢（模型）
+    # 0️⃣ 用模型輸出推到「1 個月後」（約 21 交易日）
     # =============================
+    if raw_norm_returns is None or len(raw_norm_returns) == 0:
+        raise ValueError("❌ raw_norm_returns 為空，無法用模型接 6M 圖")
+
+    H = DPM
+    # 你的 STEPS=5，raw_norm_returns 通常只有 5 天
+    # 最小改動：循環使用 (repeat) 直到湊滿 21 天
+    r_norm_month = np.resize(raw_norm_returns.astype(float), H)
+
+    p_model = float(last_close)
+    for r_norm in r_norm_month:
+        r = float(r_norm) * float(scale_last) * float(amp)
+        p_model *= np.exp(r)
+    model_1m_price = float(p_model)
+
     # =============================
-# 1️⃣ 主升趨勢（低頻，來自歷史價格）
-# =============================
-# 用近 120 個交易日估計「長期 drift」
+    # 1️⃣ 主升趨勢（低頻，來自歷史價格）
+    # =============================
     log_price = np.log(df["Close"].astype(float))
     ret_ewm = log_price.diff().ewm(span=60).mean()
-    
-    daily_drift = float(ret_ewm.iloc[-1])
-    daily_drift = np.clip(daily_drift, -0.01, 0.01)  # 防爆（±1% / day）
 
+    # ✅ drift 改更穩：取最近 20 日的平均（避免只看最後一天）
+    daily_drift = float(ret_ewm.tail(20).mean())
+    daily_drift = np.clip(daily_drift, -0.01, 0.01)  # 防爆（±1% / day）
 
     # ===== Regime 判斷（Priority 1）=====
     atr = last_valid_value(df, "ATR_14", lookback=40)
     rsi = last_valid_value(df, "RSI", lookback=40)
-    
+
     # 波動強度（相對價格）
-    vol_regime = atr / last_close if atr else 0.03
-    
+    vol_regime = (atr / last_close) if (atr is not None and last_close > 0) else 0.03
+
     # 趨勢可信度分數（0~1）
     trend_score = 1.0
-    
+
     # 1️⃣ 高檔過熱 → drift 不可信
-    if rsi and rsi > 75:
+    if rsi is not None and rsi > 75:
         trend_score *= 0.3
-    elif rsi and rsi > 65:
+    elif rsi is not None and rsi > 65:
         trend_score *= 0.6
-    
+
     # 2️⃣ 超低波動 → 偏盤整
     if vol_regime < 0.015:
         trend_score *= 0.5
-    
+
     # 3️⃣ 超高波動 → regime 不穩
     if vol_regime > 0.08:
         trend_score *= 0.7
-    
+
     # 最終調整 drift
     daily_drift *= trend_score
 
-      
     monthly_logret = daily_drift * DPM
-    
+
     trend = []
-    p = last_close
+    p = float(last_close)
     for _ in range(MONTHS):
         p *= np.exp(monthly_logret)
         trend.append(p)
-    
-    trend = np.array(trend)
-    
+    trend = np.array(trend, dtype=float)
 
-
-    # =============================
-    # 2️⃣ 主週期（價格）
-    # =============================
-    close = df["Close"].iloc[-180:].values
-    close = close - close.mean()
-
-    fft_p = np.fft.rfft(close)
-    freq_p = np.fft.rfftfreq(len(close), d=1)
-    idx_p = np.argmax(np.abs(fft_p[1:])) + 1
-    cycle_p = np.clip(int(round(1 / freq_p[idx_p])), 40, 120)
+    # ✅ 用模型 1M anchor 覆蓋第 1 個月中心趨勢（讓 6M 圖真的吃到模型）
+    trend[0] = model_1m_price
 
     # =============================
-# 3️⃣ 回檔週期（成交量）
-# =============================
-    vol_series = df["Volume"].iloc[-180:].dropna().values
-    
+    # 2️⃣ 主週期（價格）— FFT
+    # =============================
+    close = df["Close"].iloc[-180:].astype(float).values
+    close_centered = close - close.mean()
+
+    fft_p = np.fft.rfft(close_centered)
+    freq_p = np.fft.rfftfreq(len(close_centered), d=1)
+
+    # 避免 freq 太小造成週期爆大
+    mag = np.abs(fft_p)
+    mag[0] = 0.0
+    idx_p = int(np.argmax(mag))
+
+    if idx_p == 0 or freq_p[idx_p] <= 1e-6:
+        cycle_p = 80
+    else:
+        cycle_p = int(round(1 / freq_p[idx_p]))
+        cycle_p = int(np.clip(cycle_p, 40, 120))
+
+    # =============================
+    # 3️⃣ 回檔週期（成交量）— FFT
+    # =============================
+    vol_series = df["Volume"].iloc[-180:].dropna().astype(float).values
+
     if len(vol_series) < 60:
         cycle_v = 30  # fallback
     else:
         vol_centered = vol_series - vol_series.mean()
-    
         fft_v = np.fft.rfft(vol_centered)
         freq_v = np.fft.rfftfreq(len(vol_centered), d=1)
-        idx_v = np.argmax(np.abs(fft_v[1:])) + 1
-        cycle_v = np.clip(int(round(1 / freq_v[idx_v])), 20, 60)
 
+        magv = np.abs(fft_v)
+        magv[0] = 0.0
+        idx_v = int(np.argmax(magv))
+
+        if idx_v == 0 or freq_v[idx_v] <= 1e-6:
+            cycle_v = 35
+        else:
+            cycle_v = int(round(1 / freq_v[idx_v]))
+            cycle_v = int(np.clip(cycle_v, 20, 60))
 
     # =============================
     # 4️⃣ 震盪幅度（ATR × RSI）
@@ -530,30 +559,35 @@ def plot_6m_trend_advanced(
     atr = last_valid_value(df, "ATR_14", lookback=40)
     if atr is None:
         raise ValueError("❌ 無可用 ATR_14（最近 40 日皆為 NaN）")
-    atr_ratio = atr / last_close
 
+    atr_ratio = float(atr) / float(last_close)
     rsi = last_valid_value(df, "RSI", lookback=40)
-    rsi_factor = np.clip(abs(rsi - 50) / 50, 0.3, 1.2)
+    rsi_factor = np.clip(abs((rsi if rsi is not None else 50) - 50) / 50, 0.3, 1.2)
 
     base_amp = atr_ratio * rsi_factor
-    base_amp = np.clip(base_amp, 0.02, 0.18)
+    base_amp = float(np.clip(base_amp, 0.02, 0.18))
 
     # =============================
-    # 5️⃣ 合成價格（多週期）
+    # 5️⃣ 合成價格（多週期 + 模型混合中心）
     # =============================
-    prices = [last_close]
+    prices = [float(last_close)]
 
     for m in range(1, MONTHS + 1):
-        phase_p = 2 * np.pi * (m * DPM) / cycle_p
-        phase_v = 2 * np.pi * (m * DPM) / cycle_v
+        phase_p = 2 * np.pi * (m * DPM) / float(cycle_p)
+        phase_v = 2 * np.pi * (m * DPM) / float(cycle_v)
 
         cycle_main = base_amp * np.sin(phase_p)
         cycle_pull = 0.6 * base_amp * np.sin(phase_v + np.pi)
 
-        price = trend[m - 1] * (1 + cycle_main + cycle_pull)
-        prices.append(price)
+        # ✅ 模型權重逐月遞減（m=1 最相信模型，越遠越回到 heuristic）
+        w = float(np.exp(-0.35 * (m - 1)))
 
-    prices = np.array(prices)
+        center = w * float(model_1m_price) + (1 - w) * float(trend[m - 1])
+        price = center * (1 + cycle_main + cycle_pull)
+
+        prices.append(float(price))
+
+    prices = np.array(prices, dtype=float)
 
     # =============================
     # 6️⃣ 區間帶（ATR-based fan）
@@ -561,7 +595,6 @@ def plot_6m_trend_advanced(
     time_scale = np.linspace(0.6, 1.3, len(prices))
     upper = prices * (1 + base_amp * time_scale)
     lower = prices * (1 - base_amp * time_scale)
-
 
     # =============================
     # 7️⃣ X 軸（月）
@@ -585,8 +618,23 @@ def plot_6m_trend_advanced(
     for i, p in enumerate(prices[1:]):
         plt.text(i + 1, p, f"{p:.2f}", ha="center", fontsize=12)
 
+    # 小字：關鍵參數（可驗證）
+    info = (
+        f"asof={asof_date.date()} | model_1M={model_1m_price:.2f} | amp={amp:.2f}\n"
+        f"drift(d)={daily_drift:.5f} | trend_score={trend_score:.2f} | ATR%={atr_ratio:.2%} | RSI={rsi if rsi is not None else 'NA'}\n"
+        f"cycle_p={cycle_p} | cycle_v={cycle_v}"
+    )
+    plt.gca().text(
+        0.01, 0.02, info,
+        transform=plt.gca().transAxes,
+        fontsize=9,
+        alpha=0.55,
+        ha="left",
+        va="bottom"
+    )
+
     plt.xticks(x, labels, fontsize=13)
-    plt.title(f"{ticker} · 6M Outlook (Multi-Cycle + ATR + RSI)")
+    plt.title(f"{ticker} · 6M Outlook (Model-anchored + Multi-Cycle + ATR + RSI)")
     plt.grid(alpha=0.3)
     plt.legend()
 
@@ -594,6 +642,7 @@ def plot_6m_trend_advanced(
     out = f"results/{datetime.now():%Y-%m-%d}_{ticker}_6m_advanced.png"
     plt.savefig(out, dpi=300, bbox_inches="tight")
     plt.close()
+
 
 def last_valid_value(df: pd.DataFrame, col: str, lookback: int = 30):
     """
@@ -798,5 +847,7 @@ if __name__ == "__main__":
         raw_norm_returns=raw_norm_returns,
         scale_last=scale_last,
         ticker=TICKER,
-        asof_date=asof_date
+        asof_date=asof_date,
+        amp=amp
     )
+    
