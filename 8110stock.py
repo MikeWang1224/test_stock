@@ -497,10 +497,12 @@ def plot_6m_trend_advanced(
     k_ens: int = 20
 ):
     """
-    8110-tuned 6M Outlook (更貼近現實版)
-    - 不再把 5日預測硬複利 21次 → 改成「模型只調 drift 的 edge」
-    - 用 pred_dir 信心調整模型影響力（不確定就回歸保守）
-    - Expected Range 用歷史 backtest 誤差校準（有檔就用，沒有就 fallback ATR）
+    8110-tuned 6M Outlook (Realistic Trend Forecast)
+    ✅ 更貼近現實的核心：
+      1) drift 有波動上限（vol-cap），避免假趨勢一路噴
+      2) band 用「回測 log-return 誤差」校準（比價格差更穩）
+      3) conf 影響 band 寬度（不確定 => band 變寬）
+      4) FFT 週期加 gate（避免假週期）
     """
     MONTHS = 6
     DPM = 21
@@ -522,111 +524,125 @@ def plot_6m_trend_advanced(
         raise ValueError("❌ base5 為空：raw_norm_returns/pred_ret_all 無法使用")
 
     # -----------------------------
-    # 1) 先算歷史 drift（用 log-return 更穩）
+    # 1) 歷史 drift（log-return）
     # -----------------------------
     close = df["Close"].astype(float)
     logp = np.log(close + eps)
     ret = logp.diff()
 
+    # 使用較平滑的 drift（避免太噪）
     daily_drift = float(ret.ewm(span=60).mean().tail(20).mean())
-    daily_drift = float(np.clip(daily_drift, -0.01, 0.01))  # 防爆
+    daily_drift = float(np.clip(daily_drift, -0.01, 0.01))
 
     # -----------------------------
-    # 2) Regime：RSI/ATR → trend_score（控制 drift）
+    # 2) Regime：ATR / RSI 影響「趨勢可信度」
     # -----------------------------
     atr = last_valid_value(df, "ATR_14", lookback=40)
     rsi = last_valid_value(df, "RSI", lookback=40)
 
     if atr is None:
-        raise ValueError("❌ 無可用 ATR_14（最近 40 日皆為 NaN）")
+        # fallback：用最近波動近似 ATR%
+        vol20 = float(ret.dropna().tail(40).std())
+        atr_ratio = float(np.clip(vol20 * np.sqrt(1.0), 0.01, 0.20))
+    else:
+        atr_ratio = float(atr) / float(last_close + eps)
 
-    atr_ratio = float(atr) / float(last_close + eps)
-    vol_regime = atr_ratio
+    if rsi is None:
+        rsi = 50.0
 
     trend_score = 1.0
-    if rsi is not None and rsi > 75:
+    if rsi > 75:
         trend_score *= 0.35
-    elif rsi is not None and rsi > 65:
+    elif rsi > 65:
         trend_score *= 0.65
 
-    if vol_regime < 0.015:
+    # 超低波動 or 超高波動，都不太相信趨勢（更貼近市場）
+    if atr_ratio < 0.015:
         trend_score *= 0.6
-    if vol_regime > 0.08:
+    if atr_ratio > 0.08:
         trend_score *= 0.75
 
     # -----------------------------
-    # 3) ✅ 模型 edge：只用來「調 drift」，不再 21 次複利推 1M
+    # 3) 模型 edge：只調 drift（不做硬外推複利）
     # -----------------------------
-    # base5 是 normalized return → 乘回 scale_last 變成日 log-return edge
-    edge_daily = float(np.mean(base5)) * float(scale_last)
+    edge_daily = float(np.mean(base5)) * float(scale_last)  # 轉回「日 log-return edge」
 
-    # amp 不要直接放大 edge（避免噴）；只對週期震盪可放大
-    # RSI 過熱時，edge 再壓一點（更貼近現實）
-    if rsi is not None and rsi > 75:
+    # 過熱壓 edge（更貼近現實）
+    if rsi > 75:
         edge_daily *= 0.6
 
-    # ✅ cap：8110 單日 edge ±0.4% 已經很寬
+    # 單日 edge 上限（你原本 ±0.4% 很合理）
     edge_daily = float(np.clip(edge_daily, -0.004, 0.004))
 
-    # 最終 drift（加上模型 edge，再乘 trend_score）
+    # drift 合成（再乘 regime）
     daily_drift_adj = (daily_drift + edge_daily) * trend_score
     daily_drift_adj = float(np.clip(daily_drift_adj, -0.01, 0.01))
+
+    # ✅ 月 drift（log space）
     monthly_logret = daily_drift_adj * DPM
 
-    # 1M anchor（更穩、更像現實）
+    # ✅ 物理約束：月 drift 不可超過「波動尺度的幾倍」
+    # 常見合理上限：~ 1.2~1.6 * ATR% * sqrt(21)
+    vol_cap = float(1.35 * atr_ratio * np.sqrt(DPM))
+    vol_cap = float(np.clip(vol_cap, 0.03, 0.25))  # 8110 保守些：月最大約 3%~25%（log）
+    monthly_logret = float(np.clip(monthly_logret, -vol_cap, vol_cap))
+
     model_1m_price = float(last_close * np.exp(monthly_logret))
 
     # -----------------------------
-    # 4) FFT 週期：用 log-return 做（避免趨勢被當週期）
+    # 4) FFT 週期：加 gate 避免假週期
     # -----------------------------
-    r = ret.dropna().iloc[-180:].values
-    if len(r) < 60:
-        cycle_p = 80
-    else:
-        r_centered = r - r.mean()
-        fft_p = np.fft.rfft(r_centered)
-        freq_p = np.fft.rfftfreq(len(r_centered), d=1)
-        mag = np.abs(fft_p)
+    def pick_cycle_from_fft(x, lo, hi, fallback):
+        x = np.asarray(x, dtype=float)
+        if len(x) < 80:
+            return fallback
+
+        xc = x - np.mean(x)
+        fft = np.fft.rfft(xc)
+        mag = np.abs(fft)
         mag[0] = 0.0
-        idx_p = int(np.argmax(mag))
-        if idx_p == 0 or freq_p[idx_p] <= 1e-6:
-            cycle_p = 80
-        else:
-            cycle_p = int(round(1 / freq_p[idx_p]))
-            cycle_p = int(np.clip(cycle_p, 40, 120))
 
-    vol_series = df["Volume"].iloc[-180:].dropna().astype(float).values
-    if len(vol_series) < 60:
-        cycle_v = 30
-    else:
-        v_centered = vol_series - vol_series.mean()
-        fft_v = np.fft.rfft(v_centered)
-        freq_v = np.fft.rfftfreq(len(v_centered), d=1)
-        magv = np.abs(fft_v)
-        magv[0] = 0.0
-        idx_v = int(np.argmax(magv))
-        if idx_v == 0 or freq_v[idx_v] <= 1e-6:
-            cycle_v = 35
-        else:
-            cycle_v = int(round(1 / freq_v[idx_v]))
-            cycle_v = int(np.clip(cycle_v, 20, 60))
+        # top1 / top2 gate
+        order = np.argsort(mag)[::-1]
+        if len(order) < 3:
+            return fallback
+
+        top1 = float(mag[order[0]])
+        top2 = float(mag[order[1]])
+        if top2 <= 1e-12:
+            return fallback
+
+        # 峰值不夠突出 => 不相信週期
+        if (top1 / top2) < 1.25:
+            return fallback
+
+        freq = np.fft.rfftfreq(len(xc), d=1)
+        f = float(freq[order[0]])
+        if f <= 1e-6:
+            return fallback
+
+        p = int(round(1.0 / f))
+        return int(np.clip(p, lo, hi))
+
+    r180 = ret.dropna().tail(180).values
+    cycle_p = pick_cycle_from_fft(r180, lo=40, hi=120, fallback=80)
+
+    v180 = df["Volume"].dropna().tail(180).astype(float).values
+    cycle_v = pick_cycle_from_fft(v180, lo=20, hi=60, fallback=35)
 
     # -----------------------------
-    # 5) 震盪幅度 base_amp（由 ATR%，RSI過熱不要放大）
+    # 5) 震盪幅度 base_amp（只用來畫「像市場」的 oscillation）
     # -----------------------------
-    if rsi is None:
-        rsi = 50.0
     rsi_strength = abs(float(rsi) - 50.0) / 50.0
-    rsi_factor = np.clip(0.6 + 0.8 * rsi_strength, 0.7, 1.25)
+    rsi_factor = float(np.clip(0.6 + 0.8 * rsi_strength, 0.7, 1.25))
     if rsi > 75:
-        rsi_factor *= 0.75  # 過熱壓縮震盪
+        rsi_factor *= 0.75
 
     base_amp = float(np.clip(atr_ratio * rsi_factor, 0.02, 0.18))
-    # ✅ amp 只用來調週期震盪（不是調模型 drift）
     base_amp = float(np.clip(base_amp * float(amp), 0.02, 0.22))
 
     # -----------------------------
-    # 6) drift 基準線（不用覆蓋 trend[0]，避免雙重 anchor）
+    # 6) baseline trend（純 drift 路徑）
     # -----------------------------
     trend = []
     p = float(last_close)
@@ -636,10 +652,10 @@ def plot_6m_trend_advanced(
     trend = np.array(trend, dtype=float)
 
     # -----------------------------
-    # 7) ✅ 用 pred_dir 信心調整模型影響力 w（更像現實）
+    # 7) conf：影響「你信模型多少」+「不確定性多寬」
     # -----------------------------
     if pred_dir_last is None:
-        conf = 0.35  # 不知道信心 → 保守
+        conf = 0.35
     else:
         try:
             pdv = float(pred_dir_last)
@@ -649,6 +665,8 @@ def plot_6m_trend_advanced(
             conf = 0.35
 
     prices = [float(last_close)]
+    centers = [float(last_close)]
+
     for m in range(1, MONTHS + 1):
         phase_p = 2 * np.pi * (m * DPM) / float(cycle_p)
         phase_v = 2 * np.pi * (m * DPM) / float(cycle_v)
@@ -656,47 +674,66 @@ def plot_6m_trend_advanced(
         cycle_main = base_amp * np.sin(phase_p)
         cycle_pull = 0.6 * base_amp * np.sin(phase_v + np.pi)
 
-        # 月份越遠越不信模型；conf 越低也越不信
+        # 越久越不信模型；conf 越低也越不信
         w_time = float(np.exp(-0.55 * (m - 1)))
         w_conf = 0.25 + 0.75 * conf
         w = float(np.clip(w_time * w_conf, 0.05, 0.90))
 
+        # center：用「月1 anchor」來提供 edge，但不讓它主宰太久
         center = w * model_1m_price + (1 - w) * float(trend[m - 1])
         price = center * (1 + cycle_main + cycle_pull)
+
+        centers.append(float(center))
         prices.append(float(price))
 
     prices = np.array(prices, dtype=float)
+    centers = np.array(centers, dtype=float)
 
     # -----------------------------
-    # 8) ✅ Expected Range：用你自己 backtest 誤差校準（更貼近真實）
+    # 8) ✅ Expected Range：用 log-return backtest error（更貼近真實）
     # -----------------------------
-    def load_recent_price_errors(ticker, max_files=90):
+    def load_recent_logret_errors(ticker, max_files=120):
         files = sorted(glob.glob(f"results/*_{ticker}_backtest.csv"))[-max_files:]
         errs = []
         for f in files:
             try:
                 bt = pd.read_csv(f)
-                # 誤差：actual - pred（價格差）
-                e = float(bt["actual_t1"].iloc[0]) - float(bt["pred_t1"].iloc[0])
+                close_t = float(bt["close_t"].iloc[0])
+                pred_t1 = float(bt["pred_t1"].iloc[0])
+                actual_t1 = float(bt["actual_t1"].iloc[0])
+
+                if close_t <= 0 or pred_t1 <= 0 or actual_t1 <= 0:
+                    continue
+
+                # 用「相對報酬」的誤差： (actual/close) - (pred/close) 在 log space
+                e = np.log(actual_t1 / close_t) - np.log(pred_t1 / close_t)
+                e = float(e)
                 if np.isfinite(e):
                     errs.append(e)
             except Exception:
                 pass
         return np.array(errs, dtype=float)
 
-    errs = load_recent_price_errors(ticker)
+    log_errs = load_recent_logret_errors(ticker)
     t = np.arange(len(prices), dtype=float)
-    scale_t = np.sqrt(np.maximum(t, 1.0))  # √t 擴散
+    scale_t = np.sqrt(np.maximum(t, 1.0))  # √t 擴散（像隨機游走）
 
-    if len(errs) >= 20:
-        q10, q90 = np.quantile(errs, [0.10, 0.90])
-        # 用回測誤差來擴散 band（價格差）
-        upper = prices + float(q90) * scale_t
-        lower = prices + float(q10) * scale_t
+    # ✅ conf 影響 band 寬度：越沒把握越寬
+    # conf=1 => factor ~1.0；conf=0 => factor ~1.8
+    unc_factor = float(1.0 + 0.8 * (1.0 - conf))
+
+    if len(log_errs) >= 25:
+        q10, q90 = np.quantile(log_errs, [0.10, 0.90])  # 10~90% 區間
+        # band 在 log 空間擴散，最後轉回價格
+        upper = centers * np.exp(float(q90) * scale_t * unc_factor)
+        lower = centers * np.exp(float(q10) * scale_t * unc_factor)
     else:
-        # fallback：用 ATR 做 band（較粗，但不會亂）
-        upper = prices * (1 + base_amp * (0.6 + 0.7 * (scale_t / scale_t.max())))
-        lower = prices * (1 - base_amp * (0.6 + 0.7 * (scale_t / scale_t.max())))
+        # fallback：用 ATR% 做 log-band
+        # 以 atr_ratio 當日波動代理，月擴散約 √t
+        sigma = float(np.clip(atr_ratio, 0.01, 0.20))
+        k = 1.05  # 大概對應 10~90 的粗略尺度
+        upper = centers * np.exp(+k * sigma * scale_t * unc_factor)
+        lower = centers * np.exp(-k * sigma * scale_t * unc_factor)
 
     # -----------------------------
     # 9) X label
@@ -707,12 +744,12 @@ def plot_6m_trend_advanced(
     ]
 
     # -----------------------------
-    # 10) Plot
+    # 10) Plot（檔名不變）
     # -----------------------------
     plt.figure(figsize=(15, 7))
     x = np.arange(MONTHS + 1)
 
-    plt.fill_between(x, lower, upper, alpha=0.18, label="Expected Range")
+    plt.fill_between(x, lower, upper, alpha=0.18, label="Expected Range (10-90%)")
     plt.plot(x, prices, "r-o", linewidth=2.8, label="Projected Path")
     plt.scatter(0, prices[0], s=180, marker="*", label="Today")
 
@@ -720,9 +757,9 @@ def plot_6m_trend_advanced(
         plt.text(i + 1, p, f"{p:.2f}", ha="center", fontsize=12)
 
     info = (
-        f"asof={asof_date.date()} | model_1M={model_1m_price:.2f} | amp={amp:.2f} | conf={conf:.2f}\n"
+        f"asof={asof_date.date()} | model_1M={model_1m_price:.2f} | amp={amp:.2f} | conf={conf:.2f} | unc={unc_factor:.2f}\n"
         f"drift(d)={daily_drift_adj:.5f} | trend_score={trend_score:.2f} | ATR%={atr_ratio:.2%} | RSI={float(rsi):.2f}\n"
-        f"cycle_p={cycle_p} | cycle_v={cycle_v} | base_amp={base_amp:.3f} | edge(d)={edge_daily:.4f}"
+        f"cycle_p={cycle_p} | cycle_v={cycle_v} | base_amp={base_amp:.3f} | edge(d)={edge_daily:.4f} | vol_cap(m)={vol_cap:.3f}"
     )
     plt.gca().text(
         0.01, 0.02, info,
@@ -734,7 +771,7 @@ def plot_6m_trend_advanced(
     )
 
     plt.xticks(x, labels, fontsize=13)
-    plt.title(f"{ticker} · 6M Outlook (Realistic 8110: drift+edge, calibrated band)")
+    plt.title(f"{ticker} · 6M Outlook (Realistic Trend + Calibrated Uncertainty)")
     plt.grid(alpha=0.3)
     plt.legend()
 
