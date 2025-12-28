@@ -431,64 +431,58 @@ def plot_backtest_error(df, ticker: str):
     out_csv = f"results/{today:%Y-%m-%d}_{ticker}_backtest.csv"
     bt.to_csv(out_csv, index=False, encoding="utf-8-sig")
 
+import glob
+
 def plot_6m_trend_advanced(
     df: pd.DataFrame,
     last_close: float,
-    raw_norm_returns: np.ndarray,   # 你主程式傳進來的 pred_ret[-1] 也行，但建議改成 pred_ret (整段) 更好
+    raw_norm_returns: np.ndarray,
     scale_last: float,
     ticker: str,
     asof_date: pd.Timestamp,
     amp: float = 1.0,
-    pred_ret_all: np.ndarray | None = None,   # 🔧 NEW: 可選，若你願意傳 pred_ret 全部進來會更穩
-    k_ens: int = 20                              # 🔧 NEW: 最近 K 個樣本 ensemble
+    pred_ret_all=None,          # 可選：傳入 pred_ret 全部 (N, STEPS)
+    pred_dir_last=None,         # 可選：傳入最後一筆方向機率 (float, 0~1)
+    k_ens: int = 20
 ):
+    """
+    8110-tuned 6M Outlook (更貼近現實版)
+    - 不再把 5日預測硬複利 21次 → 改成「模型只調 drift 的 edge」
+    - 用 pred_dir 信心調整模型影響力（不確定就回歸保守）
+    - Expected Range 用歷史 backtest 誤差校準（有檔就用，沒有就 fallback ATR）
+    """
     MONTHS = 6
-    DPM = 21  # trading days per month
+    DPM = 21
     eps = 1e-9
 
-    # =============================
-    # 0) 更穩的「模型 1M anchor」
-    # =============================
-    if pred_ret_all is not None and len(pred_ret_all) >= 5:
-        # ✅ 8110：用 median ensemble 抗極端
-        K = min(k_ens, len(pred_ret_all))
-        base5 = np.median(pred_ret_all[-K:], axis=0).astype(float)  # shape (STEPS,)
+    # -----------------------------
+    # 0) 取模型 5日輸出（ensemble 更穩）
+    # -----------------------------
+    if pred_ret_all is not None:
+        try:
+            K = min(int(k_ens), len(pred_ret_all))
+            base5 = np.median(np.asarray(pred_ret_all)[-K:], axis=0).astype(float)
+        except Exception:
+            base5 = np.array(raw_norm_returns, dtype=float)
     else:
-        # fallback：只能用最後一筆
-        if raw_norm_returns is None or len(raw_norm_returns) == 0:
-            raise ValueError("❌ raw_norm_returns 為空，無法用模型接 6M 圖")
         base5 = np.array(raw_norm_returns, dtype=float)
 
-    # ✅ 不要重播 5 天形狀：用「平滑 + 低通」延展到 21 天
-    #    做法：把 base5 先去均值，再用均值回填，避免 5天 pattern 直接重播
-    base_mu = float(np.mean(base5))
-    base_centered = base5 - base_mu
+    if base5 is None or len(base5) == 0:
+        raise ValueError("❌ base5 為空：raw_norm_returns/pred_ret_all 無法使用")
 
-    # 延展到 21 天：用循環，但縮小 pattern 的振幅（8110 會比較合理）
-    H = DPM
-    r_norm_month = np.resize(base_centered, H) * 0.45 + base_mu
-
-    # 1M 由模型推回價格
-    p_model = float(last_close)
-    for r_norm in r_norm_month:
-        r = float(r_norm) * float(scale_last) * float(amp)
-        p_model *= np.exp(r)
-    model_1m_price = float(p_model)
-
-    # =============================
-    # 1) 基礎 drift（用歷史報酬更穩）
-    # =============================
+    # -----------------------------
+    # 1) 先算歷史 drift（用 log-return 更穩）
+    # -----------------------------
     close = df["Close"].astype(float)
     logp = np.log(close + eps)
     ret = logp.diff()
 
-    # ✅ drift: 最近 20 日平均 + 防爆
     daily_drift = float(ret.ewm(span=60).mean().tail(20).mean())
-    daily_drift = float(np.clip(daily_drift, -0.01, 0.01))
+    daily_drift = float(np.clip(daily_drift, -0.01, 0.01))  # 防爆
 
-    # =============================
-    # 2) Regime score（RSI/ATR 一致化）
-    # =============================
+    # -----------------------------
+    # 2) Regime：RSI/ATR → trend_score（控制 drift）
+    # -----------------------------
     atr = last_valid_value(df, "ATR_14", lookback=40)
     rsi = last_valid_value(df, "RSI", lookback=40)
 
@@ -499,51 +493,57 @@ def plot_6m_trend_advanced(
     vol_regime = atr_ratio
 
     trend_score = 1.0
-    # RSI 過熱：趨勢可信度下降
     if rsi is not None and rsi > 75:
         trend_score *= 0.35
     elif rsi is not None and rsi > 65:
         trend_score *= 0.65
 
-    # 超低波動偏盤整
     if vol_regime < 0.015:
         trend_score *= 0.6
-
-    # 超高波動 → regime 不穩（8110 常見）
     if vol_regime > 0.08:
         trend_score *= 0.75
 
-    daily_drift *= trend_score
-    monthly_logret = daily_drift * DPM
+    # -----------------------------
+    # 3) ✅ 模型 edge：只用來「調 drift」，不再 21 次複利推 1M
+    # -----------------------------
+    # base5 是 normalized return → 乘回 scale_last 變成日 log-return edge
+    edge_daily = float(np.mean(base5)) * float(scale_last)
 
-    # drift 基準線（不要再把 trend[0] 強行改成 model_1m_price，避免雙重 anchor）
-    trend = []
-    p = float(last_close)
-    for _ in range(MONTHS):
-        p *= np.exp(monthly_logret)
-        trend.append(p)
-    trend = np.array(trend, dtype=float)
+    # amp 不要直接放大 edge（避免噴）；只對週期震盪可放大
+    # RSI 過熱時，edge 再壓一點（更貼近現實）
+    if rsi is not None and rsi > 75:
+        edge_daily *= 0.6
 
-    # =============================
-    # 3) 週期：用「log-return」做 FFT（避免把趨勢當週期）
-    # =============================
+    # ✅ cap：8110 單日 edge ±0.4% 已經很寬
+    edge_daily = float(np.clip(edge_daily, -0.004, 0.004))
+
+    # 最終 drift（加上模型 edge，再乘 trend_score）
+    daily_drift_adj = (daily_drift + edge_daily) * trend_score
+    daily_drift_adj = float(np.clip(daily_drift_adj, -0.01, 0.01))
+    monthly_logret = daily_drift_adj * DPM
+
+    # 1M anchor（更穩、更像現實）
+    model_1m_price = float(last_close * np.exp(monthly_logret))
+
+    # -----------------------------
+    # 4) FFT 週期：用 log-return 做（避免趨勢被當週期）
+    # -----------------------------
     r = ret.dropna().iloc[-180:].values
     if len(r) < 60:
         cycle_p = 80
     else:
         r_centered = r - r.mean()
-        fft = np.fft.rfft(r_centered)
-        freq = np.fft.rfftfreq(len(r_centered), d=1)
-        mag = np.abs(fft)
+        fft_p = np.fft.rfft(r_centered)
+        freq_p = np.fft.rfftfreq(len(r_centered), d=1)
+        mag = np.abs(fft_p)
         mag[0] = 0.0
         idx_p = int(np.argmax(mag))
-        if idx_p == 0 or freq[idx_p] <= 1e-6:
+        if idx_p == 0 or freq_p[idx_p] <= 1e-6:
             cycle_p = 80
         else:
-            cycle_p = int(round(1 / freq[idx_p]))
+            cycle_p = int(round(1 / freq_p[idx_p]))
             cycle_p = int(np.clip(cycle_p, 40, 120))
 
-    # volume cycle（保留你原想法）
     vol_series = df["Volume"].iloc[-180:].dropna().astype(float).values
     if len(vol_series) < 60:
         cycle_v = 30
@@ -560,26 +560,43 @@ def plot_6m_trend_advanced(
             cycle_v = int(round(1 / freq_v[idx_v]))
             cycle_v = int(np.clip(cycle_v, 20, 60))
 
-    # =============================
-    # 4) 震盪幅度 base_amp：RSI 過熱要「壓」而不是加碼
-    # =============================
+    # -----------------------------
+    # 5) 震盪幅度 base_amp（由 ATR%，RSI過熱不要放大）
+    # -----------------------------
     if rsi is None:
         rsi = 50.0
-
-    # 原本你是 abs(rsi-50)/50 → 越極端越大
-    # ✅ 8110：過熱時容易鈍化/回檔，反而不要把 amp 拉太大
     rsi_strength = abs(float(rsi) - 50.0) / 50.0
     rsi_factor = np.clip(0.6 + 0.8 * rsi_strength, 0.7, 1.25)
-
-    # RSI > 75：額外壓縮（避免「趨勢降但震盪升」打架）
     if rsi > 75:
-        rsi_factor *= 0.75
+        rsi_factor *= 0.75  # 過熱壓縮震盪
 
     base_amp = float(np.clip(atr_ratio * rsi_factor, 0.02, 0.18))
+    # ✅ amp 只用來調週期震盪（不是調模型 drift）
+    base_amp = float(np.clip(base_amp * float(amp), 0.02, 0.22))
 
-    # =============================
-    # 5) 合成：Model anchor 權重逐月衰減（只混一次）
-    # =============================
+    # -----------------------------
+    # 6) drift 基準線（不用覆蓋 trend[0]，避免雙重 anchor）
+    # -----------------------------
+    trend = []
+    p = float(last_close)
+    for _ in range(MONTHS):
+        p *= np.exp(monthly_logret)
+        trend.append(p)
+    trend = np.array(trend, dtype=float)
+
+    # -----------------------------
+    # 7) ✅ 用 pred_dir 信心調整模型影響力 w（更像現實）
+    # -----------------------------
+    if pred_dir_last is None:
+        conf = 0.35  # 不知道信心 → 保守
+    else:
+        try:
+            pdv = float(pred_dir_last)
+            conf = abs(pdv - 0.5) * 2.0  # 0~1
+            conf = float(np.clip(conf, 0.0, 1.0))
+        except Exception:
+            conf = 0.35
+
     prices = [float(last_close)]
     for m in range(1, MONTHS + 1):
         phase_p = 2 * np.pi * (m * DPM) / float(cycle_p)
@@ -588,8 +605,10 @@ def plot_6m_trend_advanced(
         cycle_main = base_amp * np.sin(phase_p)
         cycle_pull = 0.6 * base_amp * np.sin(phase_v + np.pi)
 
-        # ✅ 8110：第一個月強信模型、之後快速衰減回歸 drift
-        w = float(np.exp(-0.55 * (m - 1)))
+        # 月份越遠越不信模型；conf 越低也越不信
+        w_time = float(np.exp(-0.55 * (m - 1)))
+        w_conf = 0.25 + 0.75 * conf
+        w = float(np.clip(w_time * w_conf, 0.05, 0.90))
 
         center = w * model_1m_price + (1 - w) * float(trend[m - 1])
         price = center * (1 + cycle_main + cycle_pull)
@@ -597,26 +616,48 @@ def plot_6m_trend_advanced(
 
     prices = np.array(prices, dtype=float)
 
-    # =============================
-    # 6) Fan：√t widening（更像不確定性擴散）
-    # =============================
+    # -----------------------------
+    # 8) ✅ Expected Range：用你自己 backtest 誤差校準（更貼近真實）
+    # -----------------------------
+    def load_recent_price_errors(ticker, max_files=90):
+        files = sorted(glob.glob(f"results/*_{ticker}_backtest.csv"))[-max_files:]
+        errs = []
+        for f in files:
+            try:
+                bt = pd.read_csv(f)
+                # 誤差：actual - pred（價格差）
+                e = float(bt["actual_t1"].iloc[0]) - float(bt["pred_t1"].iloc[0])
+                if np.isfinite(e):
+                    errs.append(e)
+            except Exception:
+                pass
+        return np.array(errs, dtype=float)
+
+    errs = load_recent_price_errors(ticker)
     t = np.arange(len(prices), dtype=float)
-    time_scale = np.sqrt(np.maximum(t, 1.0))
-    time_scale = time_scale / time_scale.max()  # normalize 0~1
+    scale_t = np.sqrt(np.maximum(t, 1.0))  # √t 擴散
 
-    upper = prices * (1 + base_amp * (0.6 + 0.7 * time_scale))
-    lower = prices * (1 - base_amp * (0.6 + 0.7 * time_scale))
+    if len(errs) >= 20:
+        q10, q90 = np.quantile(errs, [0.10, 0.90])
+        # 用回測誤差來擴散 band（價格差）
+        upper = prices + float(q90) * scale_t
+        lower = prices + float(q10) * scale_t
+    else:
+        # fallback：用 ATR 做 band（較粗，但不會亂）
+        upper = prices * (1 + base_amp * (0.6 + 0.7 * (scale_t / scale_t.max())))
+        lower = prices * (1 - base_amp * (0.6 + 0.7 * (scale_t / scale_t.max())))
 
-    # =============================
-    # 7) X label
-    # =============================
+    # -----------------------------
+    # 9) X label
+    # -----------------------------
     labels = ["Now"] + [
-        (asof_date + pd.DateOffset(months=i)).strftime("%Y-%m") for i in range(1, MONTHS + 1)
+        (asof_date + pd.DateOffset(months=i)).strftime("%Y-%m")
+        for i in range(1, MONTHS + 1)
     ]
 
-    # =============================
-    # 8) Plot
-    # =============================
+    # -----------------------------
+    # 10) Plot
+    # -----------------------------
     plt.figure(figsize=(15, 7))
     x = np.arange(MONTHS + 1)
 
@@ -628,9 +669,9 @@ def plot_6m_trend_advanced(
         plt.text(i + 1, p, f"{p:.2f}", ha="center", fontsize=12)
 
     info = (
-        f"asof={asof_date.date()} | model_1M={model_1m_price:.2f} | amp={amp:.2f}\n"
-        f"drift(d)={daily_drift:.5f} | trend_score={trend_score:.2f} | ATR%={atr_ratio:.2%} | RSI={rsi:.2f}\n"
-        f"cycle_p={cycle_p} | cycle_v={cycle_v} | base_amp={base_amp:.3f}"
+        f"asof={asof_date.date()} | model_1M={model_1m_price:.2f} | amp={amp:.2f} | conf={conf:.2f}\n"
+        f"drift(d)={daily_drift_adj:.5f} | trend_score={trend_score:.2f} | ATR%={atr_ratio:.2%} | RSI={float(rsi):.2f}\n"
+        f"cycle_p={cycle_p} | cycle_v={cycle_v} | base_amp={base_amp:.3f} | edge(d)={edge_daily:.4f}"
     )
     plt.gca().text(
         0.01, 0.02, info,
@@ -642,7 +683,7 @@ def plot_6m_trend_advanced(
     )
 
     plt.xticks(x, labels, fontsize=13)
-    plt.title(f"{ticker} · 6M Outlook (8110-tuned: Model anchor + Cycles + ATR/RSI)")
+    plt.title(f"{ticker} · 6M Outlook (Realistic 8110: drift+edge, calibrated band)")
     plt.grid(alpha=0.3)
     plt.legend()
 
@@ -849,6 +890,11 @@ if __name__ == "__main__":
     plot_and_save(df, future_df, ticker=TICKER)
     plot_backtest_error(df, ticker=TICKER)
     # ================= 6M Trend Forecast（x 軸 = 月） =================
+    pred_ret, pred_dir = model.predict(X_te_s, verbose=0)
+    raw_norm_returns = pred_ret[-1]
+    pred_dir_last = float(pred_dir[-1][0])
+    
+    # ================= 6M Trend Forecast（更貼近現實版） =================
     plot_6m_trend_advanced(
         df=df,
         last_close=last_close,
@@ -856,8 +902,10 @@ if __name__ == "__main__":
         scale_last=scale_last,
         ticker=TICKER,
         asof_date=asof_date,
-        pred_ret_all=pred_ret,
         amp=amp,
+        pred_ret_all=pred_ret,
+        pred_dir_last=pred_dir_last,
         k_ens=20
     )
     
+        
