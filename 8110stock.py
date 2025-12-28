@@ -857,7 +857,7 @@ if __name__ == "__main__":
         ticker=TICKER,
         asof_date=asof_date,
         pred_ret_all=pred_ret,
-        amp=amp
+        amp=amp,
         k_ens=20
     )
     
