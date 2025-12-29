@@ -296,6 +296,10 @@ def plot_backtest_error(df, ticker):
     ✅ 正確時間序回測（以 forecast 當天為 anchor）
     ✅ 只選「最新但排除今天」的 forecast
     """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    
+    gen_time = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
 
     suffix = f"_{ticker}_forecast.csv"
     forecast_files = []
@@ -391,6 +395,8 @@ def plot_backtest_error(df, ticker):
     )
 
 
+    ts = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d")
+    
     os.makedirs("results", exist_ok=True)
     out_date = datetime.now().date()
     plt.savefig(
