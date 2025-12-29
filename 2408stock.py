@@ -291,51 +291,66 @@ def plot_and_save(df_hist, future_df, ticker):
     plt.savefig(f"results/{datetime.now():%Y-%m-%d}_{ticker}_pred.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-# ================= 回測決策分岔圖（PNG + CSV，讀對應 ticker forecast） =================
 def plot_backtest_error(df, ticker):
-    if not os.path.exists("results"):
-        print("⚠️ 無 results 資料夾，略過回測")
-        return
+    """
+    ✅ 正確時間序回測（以 forecast 當天為 anchor）
+    ✅ 只選「最新但排除今天」的 forecast
+    """
 
-    # === 找最近一份「已發生」的 forecast ===
     suffix = f"_{ticker}_forecast.csv"
     forecast_files = []
+
+    today = pd.Timestamp(datetime.now().date())
 
     for f in os.listdir("results"):
         if not f.endswith(suffix):
             continue
         try:
             d = pd.to_datetime(f.split("_")[0])
+            if d >= today:
+                continue  # ✅ 排除今天的 forecast
             forecast_files.append((d, f))
         except Exception:
             continue
 
     if not forecast_files:
-        print(f"⚠️ 找不到 forecast：{ticker}")
+        print(f"⚠️ 沒有可回測的 forecast（已排除今天）：{ticker}")
         return
 
+    # ✅ 最新（但不是今天）
     forecast_files.sort(key=lambda x: x[0], reverse=True)
     forecast_date, forecast_name = forecast_files[0]
+
     future_df = pd.read_csv(
         os.path.join("results", forecast_name),
         parse_dates=["date"]
     )
 
-    # === 只用真實交易日 ===
-    t, t1 = get_last_two_trading_days(df)
+    # ================= 正確時間 anchor =================
+    t1 = future_df["date"].min()  # 模型預測的第一天（t+1）
+
+    if t1 not in df.index:
+        print("⚠️ forecast 的 t+1 不在 df 交易日內，略過回測")
+        return
+
+    t_idx = df.index.get_loc(t1) - 1
+    if t_idx < 0:
+        print("⚠️ 無法取得 t（資料不足）")
+        return
+
+    t = df.index[t_idx]
 
     close_t = float(df.loc[t, "Close"])
     actual_t1 = float(df.loc[t1, "Close"])
 
-    # forecast 的第一天必須是 t1
     pred_row = future_df[future_df["date"] == t1]
     if pred_row.empty:
-        print("⚠️ forecast 與交易日未對齊，略過回測")
+        print("⚠️ forecast 與 t+1 未對齊")
         return
 
     pred_t1 = float(pred_row["Pred_Close"].iloc[0])
 
-    # === 繪圖 ===
+    # ================= 繪圖 =================
     trend = df.loc[:t].tail(4)
     x_trend = np.arange(len(trend))
     x_t = x_trend[-1]
@@ -369,33 +384,42 @@ def plot_backtest_error(df, ticker):
 
     ax.text(
         0.01, 0.01,
-        f"Generated at {now_tw:%Y-%m-%d %H:%M:%S} (TW)",
+        f"Forecast file: {forecast_name}",
         transform=ax.transAxes,
         fontsize=8, alpha=0.4
     )
 
     os.makedirs("results", exist_ok=True)
-    today = datetime.now().date()
-    plt.savefig(f"results/{today}_{ticker}_backtest.png",
-                dpi=300, bbox_inches="tight")
+    out_date = datetime.now().date()
+    plt.savefig(
+        f"results/{out_date}_{ticker}_backtest.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
     plt.close()
 
-    # === CSV ===
+    # ================= CSV =================
     bt = pd.DataFrame([{
-        "forecast_date": forecast_date.date(),
-        "decision_day": t.date(),
+        "forecast_file": forecast_name,
+        "forecast_asof_date": forecast_date.date(),
+        "t": t.date(),
+        "t1": t1.date(),
         "close_t": close_t,
         "pred_t1": pred_t1,
         "actual_t1": actual_t1,
         "direction_pred": int(np.sign(pred_t1 - close_t)),
-        "direction_actual": int(np.sign(actual_t1 - close_t))
+        "direction_actual": int(np.sign(actual_t1 - close_t)),
+        "aligned": True
     }])
 
     bt.to_csv(
-        f"results/{today}_{ticker}_backtest.csv",
+        f"results/{out_date}_{ticker}_backtest.csv",
         index=False,
         encoding="utf-8-sig"
     )
+
+    print(f"✅ Backtest OK | {forecast_name} | t={t.date()} → t+1={t1.date()}")
+
 
 
 def get_last_two_trading_days(df):
