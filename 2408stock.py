@@ -598,14 +598,13 @@ if __name__ == "__main__":
 
     # ================= 生成未來交易日（台股實際交易日） =================
     # 從 df index 找到 asof_date 的位置
-    asof_idx = df.index.get_loc(asof_date)
-    future_dates = df.index[asof_idx + 1 : asof_idx + 1 + STEPS]
+    # ================= 正確生成未來交易日（使用 BDay） =================
+    from pandas.tseries.offsets import BDay
     
-    # 若資料不足 STEPS 天，補最後一天（避免報錯）
-    if len(future_dates) < STEPS:
-        last_date = df.index[-1]
-        while len(future_dates) < STEPS:
-            future_dates = future_dates.append(pd.DatetimeIndex([last_date]))
+    future_dates = pd.bdate_range(
+        start=asof_date + BDay(1),
+        periods=STEPS
+    )
     
     future_df["date"] = future_dates
 
