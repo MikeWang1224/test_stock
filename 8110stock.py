@@ -4,7 +4,7 @@
 # -*- coding: utf-8 -*-
 """
 FireBase_Attention_LSTM_Direction.py  (8110stock.py)
-- Attention-LSTM
+- Attention-LSTM 
 - Multi-task: Return path + Direction
 - ✅ 小資料友善版：更穩、更不容易亂噴
   1) LOOKBACK=40, STEPS=5
