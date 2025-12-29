@@ -384,10 +384,12 @@ def plot_backtest_error(df, ticker):
 
     ax.text(
         0.01, 0.01,
-        f"Forecast file: {forecast_name}",
+        f"Generated at (TW): {gen_time}\nForecast source: {forecast_name}",
         transform=ax.transAxes,
-        fontsize=8, alpha=0.4
+        fontsize=8,
+        alpha=0.4
     )
+
 
     os.makedirs("results", exist_ok=True)
     out_date = datetime.now().date()
