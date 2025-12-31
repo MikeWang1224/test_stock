@@ -1,0 +1,2 @@
+﻿forecast_file,decision_day,close_t,pred_t1,actual_t1,direction_pred,direction_actual,hit
+2025-12-30_8110.TW_forecast.csv,2025-12-30,56.29999923706055,59.29700654836968,56.29999923706055,1,0,0
