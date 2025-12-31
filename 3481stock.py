@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-FireBase_Attention_LSTM_3481_6M_ONLY.py
+FireBase_Attention_LSTM_3481_6M_Huadong.py
 
 群創 3481.TW
 - Attention-LSTM
-- 只輸出「六個月趨勢預測圖」
+- 六個月趨勢預測圖（華東方法）
 - 不畫 5D、不回測
 """
 
@@ -171,8 +171,8 @@ def build_model(input_shape):
     )
     return model
 
-# ================= 6M Plot =================
-def plot_6m_forecast(df, trend_prob):
+# ================= 6M Plot（華東方法） =================
+def plot_6m_forecast_huadong(df, trend_prob):
     last_date = df.index[-1]
     last_close = float(df["Close"].iloc[-1])
 
@@ -180,7 +180,7 @@ def plot_6m_forecast(df, trend_prob):
     sigma = float(logret.rolling(20).std().iloc[-1])
     sigma = np.clip(sigma, 0.005, 0.02)
 
-    p_down, p_flat, p_up = trend_prob
+    p_down, p_flat, p_up = trend_prob  # softmax 機率
     drift = (p_up - p_down) * sigma * 0.35
     drift = np.clip(drift, -0.0015, 0.0015)
 
@@ -199,19 +199,18 @@ def plot_6m_forecast(df, trend_prob):
     plt.fill_between(future_days, lower, upper, alpha=0.25, label="Reasonable Band")
 
     plt.title(
-        f"{TICKER} | 6M Outlook\n"
+        f"{TICKER} | 6M Outlook (Huadong Method)\n"
         f"Up {p_up:.0%} | Flat {p_flat:.0%} | Down {p_down:.0%}"
     )
     plt.ylabel("Price")
     plt.legend()
     plt.grid(alpha=0.3)
 
-    fname = f"results/{datetime.now().strftime('%Y-%m-%d')}_{TICKER}_6M_forecast.png"
+    fname = f"results/{datetime.now().strftime('%Y-%m-%d')}_{TICKER}_6M_forecast_huadong.png"
     plt.tight_layout()
     plt.savefig(fname)
     plt.close()
-
-    print(f"6M forecast saved: {fname}")
+    print(f"6M forecast saved (Huadong): {fname}")
 
 # ================= Main =================
 if __name__ == "__main__":
@@ -250,7 +249,7 @@ if __name__ == "__main__":
         verbose=2
     )
 
-    model.save(f"models/{TICKER}_attn_lstm_6M_ONLY.keras")
+    model.save(f"models/{TICKER}_attn_lstm_6M_Huadong.keras")
 
     _, _, pred_tr3 = model.predict(X_va_s, verbose=0)
-    plot_6m_forecast(df, pred_tr3[-1])
+    plot_6m_forecast_huadong(df, pred_tr3[-1])
