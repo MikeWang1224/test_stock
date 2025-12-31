@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 個股資料抓取 + 技術指標計算 + Firestore 更新與寫回
-✅ 今日 Close 先覆寫，再重新計算指標（一致性修正版）
-✅ 改1：個股只寫最近 N 天（預設 3 天）
-✅ 改2：指數 / 外生因子只寫最新一天
-✅ 改3：自動判斷是否為交易日，非交易日改用最近交易日
+✅ B 方案：第一次初始化寫完整歷史，其後只寫最近 N 天
+✅ 今日 Close 先覆寫，再重新計算指標
+✅ 指數 / 外生因子只寫最近交易日
 不含模型、不含預測、不含繪圖
 """
 
@@ -21,6 +20,7 @@ from datetime import datetime
 WRITE_DAYS = 3
 COLLECTION = "NEW_stock_data_liteon"
 PERIOD = "12mo"
+INIT_CHECK_TICKER = "2301.TW"   # 用來判斷是否初始化
 
 # ================= Firebase 初始化 =================
 key_dict = json.loads(os.environ.get("FIREBASE", "{}"))
@@ -36,11 +36,28 @@ if key_dict:
 else:
     print("⚠️ FIREBASE 未設定，Firestore 寫入將略過")
 
+# ================= 初始化判斷 =================
+def is_init_mode(ticker: str) -> bool:
+    """
+    Firestore 中找不到任何含 ticker 的 document → 視為第一次初始化
+    """
+    if db is None:
+        return False
+
+    docs = (
+        db.collection(COLLECTION)
+        .limit(1)
+        .stream()
+    )
+
+    for doc in docs:
+        if ticker in doc.to_dict():
+            return False
+
+    return True
+
 # ================= 交易日工具 =================
 def get_last_trading_day(df: pd.DataFrame):
-    """
-    回傳 (last_trading_day: Timestamp, is_today_trading: bool)
-    """
     if df is None or len(df) == 0:
         return None, False
 
@@ -91,15 +108,11 @@ def overwrite_last_close(df, ticker):
     last_day, is_today_trading = get_last_trading_day(df)
     date_str = last_day.strftime("%Y-%m-%d")
 
-    if not is_today_trading:
-        print(f"ℹ️ 今日非交易日，{ticker} 改用最近交易日 {date_str}")
-
     doc = db.collection(COLLECTION).document(date_str).get()
     if doc.exists:
         payload = doc.to_dict().get(ticker, {})
         if "Close" in payload:
             df.loc[last_day, "Close"] = float(payload["Close"])
-            print(f"✔ 覆寫 {ticker} Close ({date_str}): {payload['Close']}")
 
     return df
 
@@ -109,14 +122,14 @@ def fetch_prepare_recalc(ticker):
     df = overwrite_last_close(df, ticker)
     return add_all_indicators(df)
 
-def save_stock_recent_days(df, ticker):
+def save_stock(df, ticker, init_mode=False):
     if db is None:
         return
 
-    df_tail = df.tail(WRITE_DAYS)
+    df_write = df if init_mode else df.tail(WRITE_DAYS)
     batch = db.batch()
 
-    for idx, row in df_tail.iterrows():
+    for idx, row in df_write.iterrows():
         doc_ref = db.collection(COLLECTION).document(idx.strftime("%Y-%m-%d"))
         batch.set(doc_ref, {
             ticker: {
@@ -134,9 +147,13 @@ def save_stock_recent_days(df, ticker):
         }, merge=True)
 
     batch.commit()
-    print(f"🔥 {ticker} 寫入最近 {len(df_tail)} 天")
 
-# ================= 指數 / 外生因子（只寫最近交易日） =================
+    if init_mode:
+        print(f"🚀 {ticker} 初始化完成（{len(df_write)} 天）")
+    else:
+        print(f"🔥 {ticker} 更新最近 {len(df_write)} 天")
+
+# ================= 指數 / 外生因子 =================
 def save_factor_latest(tickers, alias):
     if db is None:
         return
@@ -147,31 +164,32 @@ def save_factor_latest(tickers, alias):
             if len(df) == 0:
                 continue
 
-            last_day, is_today_trading = get_last_trading_day(df)
+            last_day, _ = get_last_trading_day(df)
             row = df.loc[last_day]
-            date_str = last_day.strftime("%Y-%m-%d")
 
-            if not is_today_trading:
-                print(f"ℹ️ 今日非交易日，{alias} 使用 {date_str}")
-
-            db.collection(COLLECTION).document(date_str).set({
+            db.collection(COLLECTION).document(
+                last_day.strftime("%Y-%m-%d")
+            ).set({
                 alias: {"Close": float(row["Close"])}
             }, merge=True)
 
-            print(f"🔥 {alias} 更新成功（來源 {tk}）")
             return
-
         except Exception:
             continue
-
-    print(f"⚠️ {alias} 全部來源失敗")
 
 # ================= Main =================
 if __name__ == "__main__":
 
+    INIT_MODE = is_init_mode(INIT_CHECK_TICKER)
+
+    if INIT_MODE:
+        print("🚀 偵測為第一次初始化，將寫入完整歷史資料")
+    else:
+        print("🔁 一般更新模式（只寫最近資料）")
+
     for ticker in ["2301.TW", "2408.TW", "8110.TW"]:
         df = fetch_prepare_recalc(ticker)
-        save_stock_recent_days(df, ticker)
+        save_stock(df, ticker, init_mode=INIT_MODE)
 
     save_factor_latest(["^TWII"], "TAIEX")
     save_factor_latest(["^TELI", "IR0027.TW"], "ELECTRONICS")
