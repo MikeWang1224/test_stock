@@ -104,39 +104,58 @@ def build_attention_lstm(input_shape, steps, max_daily_normret=3.0, lstm_units=6
 
 # ---------------- 6M Outlook ----------------
 def plot_6m_trend_advanced(df, last_close, raw_norm_returns, scale_last, ticker, asof_date):
-    MONTHS=6; DPM=21; eps=1e-9
-    close=df["Close"].astype(float); ret=np.log(close+eps).diff()
-    daily_drift=float(ret.ewm(span=60).mean().tail(20).mean())
-    daily_drift=np.clip(daily_drift,-0.01,0.01)
+    MONTHS = 6
+    DPM = 21
+    eps = 1e-9
+
+    close = df["Close"].astype(float)
+    ret = np.log(close + eps).diff()
+    daily_drift = float(ret.ewm(span=60).mean().tail(20).mean())
+    daily_drift = np.clip(daily_drift, -0.01, 0.01)
     atr_ratio = 0.05
-    monthly_logret = np.clip(daily_drift*DPM, -0.18, 0.18)
-    model_1m_price = float(last_close*np.exp(monthly_logret))
-    trend = []; p=float(last_close)
+    monthly_logret = np.clip(daily_drift * DPM, -0.18, 0.18)
+    model_1m_price = float(last_close * np.exp(monthly_logret))
+
+    trend = []
+    p = float(last_close)
     for _ in range(MONTHS):
-        p*=np.exp(monthly_logret)
+        p *= np.exp(monthly_logret)
         trend.append(p)
-    trend=np.array(trend)
-    prices=[float(last_close)]; centers=[float(last_close)]
-    for m in range(1,MONTHS+1):
-        center=float(model_1m_price*(0.6)+trend[m-1]*0.4)
-        price=center*(1+0.05*np.sin(2*np.pi*m/80))
-        centers.append(center); prices.append(price)
-    labels=["Now"]+[(asof_date+pd.DateOffset(months=i)).strftime("%Y-%m") for i in range(1,MONTHS+1)]
-    plt.figure(figsize=(15,7))
-    plt.fill_between(range(MONTHS+1), centers*0.95, centers*1.05, alpha=0.18, label="Expected Range")
-    plt.plot(range(MONTHS+1), prices,"r-o",linewidth=2.8,label="Projected Path")
+    trend = np.array(trend)
+
+    prices = [float(last_close)]
+    centers = [float(last_close)]
+
+    for m in range(1, MONTHS + 1):
+        center = float(model_1m_price * 0.6 + trend[m - 1] * 0.4)
+        price = center * (1 + 0.05 * np.sin(2 * np.pi * m / 80))
+        centers.append(center)
+        prices.append(price)
+
+    # ⭐ 這裡把 centers 轉成 np.array
+    centers = np.array(centers)
+    prices = np.array(prices)
+
+    labels = ["Now"] + [(asof_date + pd.DateOffset(months=i)).strftime("%Y-%m") for i in range(1, MONTHS + 1)]
+    plt.figure(figsize=(15, 7))
+    plt.fill_between(range(MONTHS + 1), centers * 0.95, centers * 1.05, alpha=0.18, label="Expected Range")
+    plt.plot(range(MONTHS + 1), prices, "r-o", linewidth=2.8, label="Projected Path")
     plt.scatter(0, prices[0], s=180, marker="*", label="Today")
-    for i,p in enumerate(prices[1:]):
-        plt.text(i+1,p,f"{p:.2f}",ha="center",fontsize=12)
-    plt.xticks(range(MONTHS+1), labels, fontsize=13)
+
+    for i, p in enumerate(prices[1:]):
+        plt.text(i + 1, p, f"{p:.2f}", ha="center", fontsize=12)
+
+    plt.xticks(range(MONTHS + 1), labels, fontsize=13)
     plt.title(f"{ticker} · 6M Outlook (Simplified)")
     plt.grid(alpha=0.3)
     plt.legend()
-    os.makedirs("results",exist_ok=True)
-    out=f"results/{datetime.now():%Y-%m-%d}_{ticker}_6m.png"
-    plt.savefig(out,dpi=300,bbox_inches="tight")
+
+    os.makedirs("results", exist_ok=True)
+    out = f"results/{datetime.now():%Y-%m-%d}_{ticker}_6m.png"
+    plt.savefig(out, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"✅ 6M Outlook saved: {out}")
+
 
 # ---------------- Main ----------------
 if __name__=="__main__":
