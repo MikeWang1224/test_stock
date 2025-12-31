@@ -45,6 +45,12 @@ jobs:
         run: |
           python 2301stock.py
 
+      - name: Run stock prediction program (Weichun - 3481stock.py)
+        env:
+          FIREBASE: ${{ secrets.FIREBASE }}
+        run: |
+          python 3481stock.py    
+
       # ---------------- 再跑 LSTM / 預測 / 繪圖：南亞科 ----------------
       - name: Run stock prediction program (Nanya - 2408stock.py)
         env:
