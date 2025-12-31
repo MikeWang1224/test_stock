@@ -2,7 +2,8 @@
 """
 3481.TW 群創光電
 6-Month Forecast ONLY
-- 方法與 8110 完全一致（CSV → LSTM）
+- 方法與 8110 完全一致
+- 完全使用 Firebase 資料
 - 只輸出六個月預測圖
 - 左下角顯示時間戳記（UTC+8）
 """
@@ -11,6 +12,7 @@
 # Imports
 # ===============================
 import os
+import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -26,10 +28,28 @@ from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.optimizers import Adam
 
 # ===============================
+# Firebase Setup
+# ===============================
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+key_dict = json.loads(os.environ.get("FIREBASE", "{}"))
+if not key_dict:
+    raise ValueError("❌ FIREBASE 環境變數未設定")
+
+try:
+    firebase_admin.get_app()
+except Exception:
+    cred = credentials.Certificate(key_dict)
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+
+# ===============================
 # Config
 # ===============================
 TICKER = "3481.TW"
-DATA_PATH = "data/3481.TW.csv"   # ← 跟 8110 一樣
+COLLECTION = "NEW_stock_data_liteon"
 RESULT_DIR = "results"
 os.makedirs(RESULT_DIR, exist_ok=True)
 
@@ -42,22 +62,43 @@ LR = 5e-4
 # ===============================
 # Utils
 # ===============================
+def load_df_from_firestore(ticker, collection=COLLECTION, days=500):
+    rows = []
+    for doc in db.collection(collection).stream():
+        p = doc.to_dict().get(ticker)
+        if p:
+            rows.append({"date": doc.id, **p})
+    if not rows:
+        raise ValueError(f"⚠️ Firestore 無 {ticker} 資料")
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").tail(days).set_index("date")
+    return df
+
+def ensure_latest_trading_row(df):
+    today = pd.Timestamp(datetime.now().date())
+    last = df.index.max()
+    if last >= today:
+        return df
+    all_days = pd.bdate_range(last, today)
+    for d in all_days[1:]:
+        if d not in df.index:
+            df.loc[d] = df.loc[last]
+    return df.sort_index()
+
 def compute_indicators(df):
-    # RSI
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    # MACD
     ema12 = df["Close"].ewm(span=12).mean()
     ema26 = df["Close"].ewm(span=26).mean()
     df["MACD"] = ema12 - ema26
 
     df["RET"] = df["Close"].pct_change()
     return df.dropna()
-
 
 def make_dataset(df, features):
     scaler = MinMaxScaler()
@@ -72,7 +113,6 @@ def make_dataset(df, features):
 
     return np.array(X), np.array(y), scaler
 
-
 def build_model(input_shape):
     model = Sequential([
         LSTM(64, return_sequences=True, input_shape=input_shape),
@@ -80,12 +120,8 @@ def build_model(input_shape):
         LSTM(32),
         Dense(STEPS)
     ])
-    model.compile(
-        optimizer=Adam(LR),
-        loss="mse"
-    )
+    model.compile(optimizer=Adam(LR), loss="mse")
     return model
-
 
 def add_timestamp(ax):
     now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
@@ -103,14 +139,9 @@ def add_timestamp(ax):
 # ===============================
 # Main
 # ===============================
-print("Loading CSV data (same as 8110)...")
-
-df = pd.read_csv(
-    DATA_PATH,
-    parse_dates=["Date"],
-    index_col="Date"
-)
-
+print("Loading Firebase data...")
+df = load_df_from_firestore(TICKER)
+df = ensure_latest_trading_row(df)
 df = compute_indicators(df)
 
 FEATURES = ["Close", "RSI", "MACD", "Volume"]
@@ -137,13 +168,10 @@ model.fit(
 last_X = X[-1:]
 pred_scaled = model.predict(last_X)[0]
 
-# inverse scale Close only（跟 8110 一樣的做法）
 close_scaler = MinMaxScaler()
 close_scaler.fit(df[["Close"]])
 
-future_close = close_scaler.inverse_transform(
-    pred_scaled.reshape(-1, 1)
-).flatten()
+future_close = close_scaler.inverse_transform(pred_scaled.reshape(-1, 1)).flatten()
 
 future_dates = pd.bdate_range(
     start=df.index[-1] + BDay(1),
@@ -151,29 +179,17 @@ future_dates = pd.bdate_range(
 )
 
 # ===============================
-# Plot (ONLY 6M)
+# Plot
 # ===============================
 fig, ax = plt.subplots(figsize=(14, 8))
 
-ax.plot(
-    df.index[-120:],
-    df["Close"].iloc[-120:],
-    label="Historical",
-    color="black"
-)
-
-ax.plot(
-    future_dates,
-    future_close,
-    label="6-Month Forecast",
-    color="tab:blue"
-)
+ax.plot(df.index[-120:], df["Close"].iloc[-120:], label="Historical", color="black")
+ax.plot(future_dates, future_close, label="6-Month Forecast", color="tab:blue")
 
 ax.set_title("3481.TW | 6-Month Forecast", fontsize=14)
 ax.legend()
 ax.grid(alpha=0.3)
 
-# 左下角時間戳
 add_timestamp(ax)
 
 out_path = os.path.join(
