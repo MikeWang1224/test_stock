@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 3481.TW 群創光電
-6-Month Forecast (RECURSIVE VERSION)
-- Firebase only
-- Recursive 1-step LSTM
-- 更合理的 6M 路徑
+6-Month Forecast (RECURSIVE VERSION - FIXED)
 """
 
 # ===============================
@@ -52,7 +49,7 @@ RESULT_DIR = "results"
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 LOOKBACK = 40
-FORECAST_DAYS = 120     # 約 6 個月交易日
+FORECAST_DAYS = 120
 EPOCHS = 60
 BATCH = 32
 LR = 5e-4
@@ -85,6 +82,8 @@ def ensure_latest_trading_row(df):
     return df.sort_index()
 
 def compute_indicators(df):
+    df = df.copy()
+
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
@@ -95,7 +94,6 @@ def compute_indicators(df):
     ema26 = df["Close"].ewm(span=26).mean()
     df["MACD"] = ema12 - ema26
 
-    df["RET"] = df["Close"].pct_change()
     return df.dropna()
 
 def make_dataset(df):
@@ -166,12 +164,13 @@ print("Running recursive forecast...")
 window = df[FEATURES].iloc[-LOOKBACK:].copy()
 future_close = []
 
-for _ in range(FORECAST_DAYS):
-    scaled_window = scaler.transform(window)
-    pred_scaled = model.predict(scaled_window[np.newaxis, ...], verbose=0)[0, 0]
+close_idx = FEATURES.index("Close")
+close_min = scaler.data_min_[close_idx]
+close_max = scaler.data_max_[close_idx]
 
-    close_min = scaler.data_min_[FEATURES.index("Close")]
-    close_max = scaler.data_max_[FEATURES.index("Close")]
+for _ in range(FORECAST_DAYS):
+    scaled = scaler.transform(window)
+    pred_scaled = model.predict(scaled[np.newaxis, ...], verbose=0)[0, 0]
     pred_close = pred_scaled * (close_max - close_min) + close_min
 
     future_close.append(pred_close)
@@ -179,7 +178,7 @@ for _ in range(FORECAST_DAYS):
     next_row = window.iloc[-1].copy()
     next_row["Close"] = pred_close
     window = pd.concat([window.iloc[1:], next_row.to_frame().T])
-    window = compute_indicators(window)
+    window = compute_indicators(window)[FEATURES]
 
 future_dates = pd.bdate_range(
     start=df.index[-1] + BDay(1),
@@ -190,21 +189,17 @@ future_dates = pd.bdate_range(
 # Plot
 # ===============================
 fig, ax = plt.subplots(figsize=(14, 8))
-
 ax.plot(df.index[-120:], df["Close"].iloc[-120:], label="Historical", color="black")
-ax.plot(future_dates, future_close, label="6-Month Forecast (Recursive)", color="tab:red")
-
+ax.plot(future_dates, future_close, label="6M Forecast (Recursive)", color="tab:red")
 ax.set_title("3481.TW | 6-Month Forecast (Recursive)", fontsize=14)
 ax.legend()
 ax.grid(alpha=0.3)
-
 add_timestamp(ax)
 
 out_path = os.path.join(
     RESULT_DIR,
     f"{datetime.now():%Y-%m-%d}_3481_6m_forecast_recursive.png"
 )
-
 plt.tight_layout()
 plt.savefig(out_path, dpi=150)
 plt.close()
