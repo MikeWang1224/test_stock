@@ -1,13 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 3481.TW | 6M Outlook
-Quantile Attention LSTM (P10 / P50 / P90)
-[FIXED: Proper Close scaling & anchor]
+Quantile Attention LSTM (LOG-RETURN → REAL PRICE)
 """
 
-# ===============================
-# Imports
-# ===============================
 import os, json
 import numpy as np
 import pandas as pd
@@ -21,10 +17,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 import tensorflow as tf
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import (
-    Input, LSTM, Dense, Dropout,
-    Multiply, Lambda
-)
+from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, Multiply, Lambda
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.optimizers import Adam
 import tensorflow.keras.backend as K
@@ -42,8 +35,7 @@ if not key_dict:
 try:
     firebase_admin.get_app()
 except Exception:
-    cred = credentials.Certificate(key_dict)
-    firebase_admin.initialize_app(cred)
+    firebase_admin.initialize_app(credentials.Certificate(key_dict))
 
 db = firestore.client()
 
@@ -59,14 +51,14 @@ EPOCHS = 80
 BATCH = 32
 LR = 5e-4
 
-FEATURES = ["Close", "RSI", "MACD", "Volume"]
+FEATURES = ["RET", "RSI", "MACD", "Volume"]
 QUANTILES = [0.1, 0.5, 0.9]
 
 RESULT_DIR = "results"
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 # ===============================
-# Data Utils
+# Data
 # ===============================
 def load_df(ticker):
     rows = []
@@ -79,19 +71,10 @@ def load_df(ticker):
     df["date"] = pd.to_datetime(df["date"])
     return df.sort_values("date").set_index("date")
 
-def ensure_latest_row(df):
-    today = pd.Timestamp(datetime.now().date())
-    last = df.index.max()
-    if last >= today:
-        return df
-    for d in pd.bdate_range(last, today)[1:]:
-        df.loc[d] = df.loc[last]
-    return df.sort_index()
-
 def indicators(df):
     df = df.copy()
-    delta = df["Close"].diff()
 
+    delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / (loss + 1e-9)
@@ -101,26 +84,24 @@ def indicators(df):
     ema26 = df["Close"].ewm(span=26).mean()
     df["MACD"] = ema12 - ema26
 
+    df["RET"] = np.log(df["Close"] / df["Close"].shift(1))
     return df.dropna()
 
 # ===============================
-# Dataset (FIXED)
+# Dataset
 # ===============================
 def make_dataset(df):
-    x_scaler = MinMaxScaler()
-    y_scaler = MinMaxScaler()
+    scaler = MinMaxScaler()
+    X_all = scaler.fit_transform(df[FEATURES])
 
-    X_all = x_scaler.fit_transform(df[FEATURES])
-    y_close = y_scaler.fit_transform(df[["Close"]])
-
+    ret_idx = FEATURES.index("RET")
     X, y = [], []
-    for i in range(len(df) - LOOKBACK - FORECAST_DAYS):
-        X.append(X_all[i:i+LOOKBACK])
-        y.append(
-            y_close[i+LOOKBACK:i+LOOKBACK+FORECAST_DAYS, 0]
-        )
 
-    return np.array(X), np.array(y), x_scaler, y_scaler
+    for i in range(len(X_all) - LOOKBACK - FORECAST_DAYS):
+        X.append(X_all[i:i+LOOKBACK])
+        y.append(X_all[i+LOOKBACK:i+LOOKBACK+FORECAST_DAYS, ret_idx])
+
+    return np.array(X), np.array(y), scaler
 
 # ===============================
 # Quantile Loss
@@ -132,27 +113,26 @@ def quantile_loss(q):
     return loss
 
 # ===============================
-# Attention Block
+# Attention
 # ===============================
 def attention(x):
-    score = Dense(1, activation="tanh")(x)
-    score = Lambda(lambda z: K.squeeze(z, -1))(score)
-    weights = Lambda(lambda z: K.softmax(z))(score)
-    weights = Lambda(lambda z: K.expand_dims(z, -1))(weights)
-    ctx = Multiply()([x, weights])
-    return Lambda(lambda z: K.sum(z, axis=1))(ctx)
+    s = Dense(1, activation="tanh")(x)
+    s = Lambda(lambda z: K.squeeze(z, -1))(s)
+    w = Lambda(lambda z: K.softmax(z))(s)
+    w = Lambda(lambda z: K.expand_dims(z, -1))(w)
+    return Lambda(lambda z: K.sum(z[0] * z[1], axis=1))([x, w])
 
 # ===============================
 # Model
 # ===============================
 def build_model():
     inp = Input(shape=(LOOKBACK, len(FEATURES)))
-
     x = LSTM(64, return_sequences=True)(inp)
     x = Dropout(0.2)(x)
     x = LSTM(32, return_sequences=True)(x)
 
     ctx = attention(x)
+
     outs = [Dense(FORECAST_DAYS)(ctx) for _ in QUANTILES]
 
     model = Model(inp, outs)
@@ -165,8 +145,8 @@ def build_model():
 # ===============================
 # Train
 # ===============================
-df = indicators(ensure_latest_row(load_df(TICKER)))
-X, y, x_scaler, y_scaler = make_dataset(df)
+df = indicators(load_df(TICKER))
+X, y, scaler = make_dataset(df)
 
 split = int(len(X) * 0.8)
 model = build_model()
@@ -180,24 +160,26 @@ model.fit(
 )
 
 # ===============================
-# Forecast (FIXED)
+# Forecast (Return → Real Price)
 # ===============================
-last_window = x_scaler.transform(df[FEATURES].iloc[-LOOKBACK:])
-preds = model.predict(last_window[np.newaxis, ...], verbose=0)
+last_price = df["Close"].iloc[-1]
 
-p10, p50, p90 = [
-    y_scaler.inverse_transform(p[0].reshape(-1,1)).flatten()
-    for p in preds
-]
+last_window = scaler.transform(df[FEATURES].iloc[-LOOKBACK:])
+preds = model.predict(last_window[np.newaxis], verbose=0)
 
-# 🚑 quantile crossing guard
+ret_min, ret_max = scaler.data_min_[0], scaler.data_max_[0]
+p10, p50, p90 = [(p[0] * (ret_max - ret_min) + ret_min) for p in preds]
+
+# enforce monotonic
 p10 = np.minimum(p10, p50)
 p90 = np.maximum(p90, p50)
 
-future_dates = pd.bdate_range(
-    start=df.index[-1] + BDay(1),
-    periods=FORECAST_DAYS
-)
+def to_price(ret):
+    return last_price * np.exp(np.cumsum(ret))
+
+p10_p, p50_p, p90_p = map(to_price, [p10, p50, p90])
+
+future_dates = pd.bdate_range(df.index[-1] + BDay(1), periods=FORECAST_DAYS)
 
 # ===============================
 # Plot
@@ -206,9 +188,9 @@ STEP = 20
 idx = np.arange(0, FORECAST_DAYS, STEP)
 
 dates = future_dates[idx]
-mid, low, high = p50[idx], p10[idx], p90[idx]
-
-today_price = df["Close"].iloc[-1]
+mid = p50_p[idx]
+low = p10_p[idx]
+high = p90_p[idx]
 
 fig, ax = plt.subplots(figsize=(14, 8))
 ax.fill_between(dates, low, high, alpha=0.18, label="Expected Range (10–90%)")
@@ -216,36 +198,24 @@ ax.plot(dates, mid, color="red", lw=3, marker="o", label="Projected Path")
 
 ax.scatter(
     df.index[-1],
-    today_price,
-    s=240,
-    marker="*",
-    color="orange",
-    edgecolor="black",
-    label="Today",
-    zorder=6
+    last_price,
+    s=220, marker="*",
+    color="orange", edgecolor="black",
+    label="Today", zorder=5
 )
 
-offset = (high.max() - low.min()) * 0.03
 for d, p in zip(dates, mid):
-    ax.text(d, p + offset, f"{p:.2f}", ha="center", fontsize=11)
+    ax.text(d, p * 1.01, f"{p:.2f}", ha="center", fontsize=11)
 
 ax.set_title("3481.TW · 6M Outlook (Quantile Attention LSTM)", fontsize=15)
 ax.grid(alpha=0.3)
 ax.legend()
 
-now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
-ax.text(
-    0.01, 0.01,
-    f"Generated: {now_tw:%Y-%m-%d %H:%M} (UTC+8)",
-    transform=ax.transAxes,
-    fontsize=9,
-    alpha=0.65
-)
+now = datetime.now(ZoneInfo("Asia/Taipei"))
+ax.text(0.01, 0.01, f"Generated: {now:%Y-%m-%d %H:%M} (UTC+8)",
+        transform=ax.transAxes, fontsize=9, alpha=0.65)
 
-out = os.path.join(
-    RESULT_DIR,
-    f"{datetime.now():%Y-%m-%d}_3481_quantile_outlook_fixed.png"
-)
+out = f"{RESULT_DIR}/{now:%Y-%m-%d}_3481_quantile_REALPRICE.png"
 plt.tight_layout()
 plt.savefig(out, dpi=150)
 plt.close()
