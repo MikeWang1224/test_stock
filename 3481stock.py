@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-3481.TW 群創光電
-6-Month Forecast (MULTI-STEP ATTENTION LSTM)
+3481.TW | 6M Outlook
+Quantile Attention LSTM (P10 / P50 / P90)
 """
 
 # ===============================
@@ -17,24 +17,26 @@ from zoneinfo import ZoneInfo
 from pandas.tseries.offsets import BDay
 
 from sklearn.preprocessing import MinMaxScaler
+
+import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
     Input, LSTM, Dense, Dropout,
-    Permute, Multiply, Lambda
+    Multiply, Lambda
 )
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.optimizers import Adam
 import tensorflow.keras.backend as K
 
 # ===============================
-# Firebase Setup
+# Firebase
 # ===============================
 import firebase_admin
 from firebase_admin import credentials, firestore
 
 key_dict = json.loads(os.environ.get("FIREBASE", "{}"))
 if not key_dict:
-    raise ValueError("❌ FIREBASE 環境變數未設定")
+    raise RuntimeError("❌ FIREBASE env missing")
 
 try:
     firebase_admin.get_app()
@@ -49,54 +51,50 @@ db = firestore.client()
 # ===============================
 TICKER = "3481.TW"
 COLLECTION = "NEW_stock_data_liteon"
-RESULT_DIR = "results"
-os.makedirs(RESULT_DIR, exist_ok=True)
 
 LOOKBACK = 40
-FORECAST_DAYS = 120   # 6 months
+FORECAST_DAYS = 120
 EPOCHS = 80
 BATCH = 32
 LR = 5e-4
 
 FEATURES = ["Close", "RSI", "MACD", "Volume"]
+QUANTILES = [0.1, 0.5, 0.9]
+
+RESULT_DIR = "results"
+os.makedirs(RESULT_DIR, exist_ok=True)
 
 # ===============================
-# Utils
+# Data Utils
 # ===============================
-def load_df_from_firestore(ticker, collection=COLLECTION, days=600):
+def load_df(ticker):
     rows = []
-    for doc in db.collection(collection).stream():
+    for doc in db.collection(COLLECTION).stream():
         p = doc.to_dict().get(ticker)
         if p:
             rows.append({"date": doc.id, **p})
 
-    if not rows:
-        raise ValueError(f"⚠️ Firestore 無 {ticker} 資料")
-
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").tail(days).set_index("date")
-    return df
+    return df.sort_values("date").set_index("date")
 
-def ensure_latest_trading_row(df):
+def ensure_latest_row(df):
     today = pd.Timestamp(datetime.now().date())
     last = df.index.max()
     if last >= today:
         return df
-
     for d in pd.bdate_range(last, today)[1:]:
         df.loc[d] = df.loc[last]
-
     return df.sort_index()
 
-def compute_indicators(df):
+def indicators(df):
     df = df.copy()
-
     delta = df["Close"].diff()
+
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / (loss + 1e-9)
-    df["RSI"] = 100 - (100 / (1 + rs))
+    df["RSI"] = 100 - 100 / (1 + rs)
 
     ema12 = df["Close"].ewm(span=12).mean()
     ema26 = df["Close"].ewm(span=26).mean()
@@ -109,32 +107,37 @@ def make_dataset(df):
     X_all = scaler.fit_transform(df[FEATURES])
 
     close_idx = FEATURES.index("Close")
-
     X, y = [], []
+
     for i in range(len(X_all) - LOOKBACK - FORECAST_DAYS):
         X.append(X_all[i:i+LOOKBACK])
-        y.append(
-            X_all[
-                i+LOOKBACK : i+LOOKBACK+FORECAST_DAYS,
-                close_idx
-            ]
-        )
+        y.append(X_all[i+LOOKBACK:i+LOOKBACK+FORECAST_DAYS, close_idx])
 
     return np.array(X), np.array(y), scaler
 
 # ===============================
+# Quantile Loss
+# ===============================
+def quantile_loss(q):
+    def loss(y_true, y_pred):
+        e = y_true - y_pred
+        return K.mean(K.maximum(q * e, (q - 1) * e))
+    return loss
+
+# ===============================
 # Attention Block
 # ===============================
-def attention_block(x):
-    # x: (batch, time, features)
+def attention(x):
     score = Dense(1, activation="tanh")(x)
-    score = Lambda(lambda z: K.squeeze(z, axis=-1))(score)
+    score = Lambda(lambda z: K.squeeze(z, -1))(score)
     weights = Lambda(lambda z: K.softmax(z))(score)
-    weights = Lambda(lambda z: K.expand_dims(z, axis=-1))(weights)
-    context = Multiply()([x, weights])
-    context = Lambda(lambda z: K.sum(z, axis=1))(context)
-    return context
+    weights = Lambda(lambda z: K.expand_dims(z, -1))(weights)
+    ctx = Multiply()([x, weights])
+    return Lambda(lambda z: K.sum(z, axis=1))(ctx)
 
+# ===============================
+# Model
+# ===============================
 def build_model():
     inp = Input(shape=(LOOKBACK, len(FEATURES)))
 
@@ -142,79 +145,56 @@ def build_model():
     x = Dropout(0.2)(x)
     x = LSTM(32, return_sequences=True)(x)
 
-    context = attention_block(x)
-    out = Dense(FORECAST_DAYS)(context)
+    ctx = attention(x)
 
-    model = Model(inp, out)
+    outs = []
+    for q in QUANTILES:
+        outs.append(Dense(FORECAST_DAYS, name=f"q{int(q*100)}")(ctx))
+
+    model = Model(inp, outs)
     model.compile(
         optimizer=Adam(LR),
-        loss="mse"
+        loss=[quantile_loss(q) for q in QUANTILES]
     )
     return model
-
-def add_timestamp(ax):
-    now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
-    ax.text(
-        0.01, 0.01,
-        f"Generated: {now_tw:%Y-%m-%d %H:%M} (UTC+8)",
-        transform=ax.transAxes,
-        fontsize=9,
-        color="gray",
-        alpha=0.65,
-        ha="left",
-        va="bottom"
-    )
 
 # ===============================
 # Main
 # ===============================
-print("Loading Firebase data...")
-df = load_df_from_firestore(TICKER)
-df = ensure_latest_trading_row(df)
-df = compute_indicators(df)
+print("Loading data...")
+df = load_df(TICKER)
+df = ensure_latest_row(df)
+df = indicators(df)
 
 X, y, scaler = make_dataset(df)
 
 split = int(len(X) * 0.8)
-X_train, X_val = X[:split], X[split:]
-y_train, y_val = y[:split], y[split:]
+X_tr, X_va = X[:split], X[split:]
+y_tr, y_va = y[:split], y[split:]
 
-print("Training Attention-LSTM (Multi-step)...")
 model = build_model()
 model.fit(
-    X_train, y_train,
-    validation_data=(X_val, y_val),
+    X_tr,
+    [y_tr]*3,
+    validation_data=(X_va, [y_va]*3),
     epochs=EPOCHS,
     batch_size=BATCH,
-    callbacks=[
-        EarlyStopping(
-            patience=12,
-            restore_best_weights=True
-        )
-    ],
+    callbacks=[EarlyStopping(patience=12, restore_best_weights=True)],
     verbose=1
 )
 
 # ===============================
 # Forecast
 # ===============================
-print("Running 6-month forecast...")
-
-last_window = df[FEATURES].iloc[-LOOKBACK:]
-scaled_last = scaler.transform(last_window)
-
-pred_scaled = model.predict(
-    scaled_last[np.newaxis, ...],
-    verbose=0
-)[0]
+last_window = scaler.transform(df[FEATURES].iloc[-LOOKBACK:])
+preds = model.predict(last_window[np.newaxis, ...], verbose=0)
 
 close_idx = FEATURES.index("Close")
-close_min = scaler.data_min_[close_idx]
-close_max = scaler.data_max_[close_idx]
+cmin, cmax = scaler.data_min_[close_idx], scaler.data_max_[close_idx]
 
-future_close = (
-    pred_scaled * (close_max - close_min) + close_min
-)
+p10, p50, p90 = [
+    p[0] * (cmax - cmin) + cmin for p in preds
+]
 
 future_dates = pd.bdate_range(
     start=df.index[-1] + BDay(1),
@@ -222,36 +202,58 @@ future_dates = pd.bdate_range(
 )
 
 # ===============================
-# Plot
+# Plot (Same Style as Sample)
 # ===============================
+STEP = 20
+idx = np.arange(0, FORECAST_DAYS, STEP)
+
+dates = future_dates[idx]
+mid = p50[idx]
+low = p10[idx]
+high = p90[idx]
+
 fig, ax = plt.subplots(figsize=(14, 8))
-ax.plot(
-    df.index[-120:],
-    df["Close"].iloc[-120:],
-    label="Historical",
-    color="black"
+
+ax.fill_between(dates, low, high, alpha=0.18, label="Expected Range (10–90%)")
+ax.plot(dates, mid, color="red", lw=3, marker="o", label="Projected Path")
+
+ax.scatter(
+    df.index[-1],
+    df["Close"].iloc[-1],
+    s=220,
+    marker="*",
+    color="orange",
+    edgecolor="black",
+    label="Today",
+    zorder=5
 )
-ax.plot(
-    future_dates,
-    future_close,
-    label="6M Forecast (Multi-step)",
-    color="tab:red"
-)
+
+for d, p in zip(dates, mid):
+    ax.text(d, p + 1.2, f"{p:.2f}", ha="center", fontsize=11)
 
 ax.set_title(
-    "3481.TW | 6-Month Forecast (Attention-LSTM, Multi-step)",
-    fontsize=14
+    "3481.TW · 6M Outlook (Quantile Attention LSTM)",
+    fontsize=15
 )
-ax.legend()
-ax.grid(alpha=0.3)
-add_timestamp(ax)
 
-out_path = os.path.join(
+ax.grid(alpha=0.3)
+ax.legend()
+
+now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
+ax.text(
+    0.01, 0.01,
+    f"Generated: {now_tw:%Y-%m-%d %H:%M} (UTC+8)",
+    transform=ax.transAxes,
+    fontsize=9,
+    alpha=0.65
+)
+
+out = os.path.join(
     RESULT_DIR,
-    f"{datetime.now():%Y-%m-%d}_3481_6m_forecast_multistep.png"
+    f"{datetime.now():%Y-%m-%d}_3481_quantile_outlook.png"
 )
 plt.tight_layout()
-plt.savefig(out_path, dpi=150)
+plt.savefig(out, dpi=150)
 plt.close()
 
-print(f"Saved → {out_path}")
+print(f"Saved → {out}")
