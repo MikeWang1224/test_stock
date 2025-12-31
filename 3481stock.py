@@ -2,6 +2,7 @@
 """
 3481.TW | 6M Outlook
 Quantile Attention LSTM (P10 / P50 / P90)
+[FIXED: Proper Close scaling & anchor]
 """
 
 # ===============================
@@ -102,18 +103,24 @@ def indicators(df):
 
     return df.dropna()
 
+# ===============================
+# Dataset (FIXED)
+# ===============================
 def make_dataset(df):
-    scaler = MinMaxScaler()
-    X_all = scaler.fit_transform(df[FEATURES])
+    x_scaler = MinMaxScaler()
+    y_scaler = MinMaxScaler()
 
-    close_idx = FEATURES.index("Close")
+    X_all = x_scaler.fit_transform(df[FEATURES])
+    y_close = y_scaler.fit_transform(df[["Close"]])
+
     X, y = [], []
-
-    for i in range(len(X_all) - LOOKBACK - FORECAST_DAYS):
+    for i in range(len(df) - LOOKBACK - FORECAST_DAYS):
         X.append(X_all[i:i+LOOKBACK])
-        y.append(X_all[i+LOOKBACK:i+LOOKBACK+FORECAST_DAYS, close_idx])
+        y.append(
+            y_close[i+LOOKBACK:i+LOOKBACK+FORECAST_DAYS, 0]
+        )
 
-    return np.array(X), np.array(y), scaler
+    return np.array(X), np.array(y), x_scaler, y_scaler
 
 # ===============================
 # Quantile Loss
@@ -146,7 +153,6 @@ def build_model():
     x = LSTM(32, return_sequences=True)(x)
 
     ctx = attention(x)
-
     outs = [Dense(FORECAST_DAYS)(ctx) for _ in QUANTILES]
 
     model = Model(inp, outs)
@@ -160,7 +166,7 @@ def build_model():
 # Train
 # ===============================
 df = indicators(ensure_latest_row(load_df(TICKER)))
-X, y, scaler = make_dataset(df)
+X, y, x_scaler, y_scaler = make_dataset(df)
 
 split = int(len(X) * 0.8)
 model = build_model()
@@ -174,17 +180,17 @@ model.fit(
 )
 
 # ===============================
-# Forecast
+# Forecast (FIXED)
 # ===============================
-last_window = scaler.transform(df[FEATURES].iloc[-LOOKBACK:])
+last_window = x_scaler.transform(df[FEATURES].iloc[-LOOKBACK:])
 preds = model.predict(last_window[np.newaxis, ...], verbose=0)
 
-close_idx = FEATURES.index("Close")
-cmin, cmax = scaler.data_min_[close_idx], scaler.data_max_[close_idx]
+p10, p50, p90 = [
+    y_scaler.inverse_transform(p[0].reshape(-1,1)).flatten()
+    for p in preds
+]
 
-p10, p50, p90 = [(p[0] * (cmax - cmin) + cmin) for p in preds]
-
-# 🚑 修正 quantile crossing
+# 🚑 quantile crossing guard
 p10 = np.minimum(p10, p50)
 p90 = np.maximum(p90, p50)
 
@@ -194,34 +200,31 @@ future_dates = pd.bdate_range(
 )
 
 # ===============================
-# Plot (Corrected)
+# Plot
 # ===============================
 STEP = 20
 idx = np.arange(0, FORECAST_DAYS, STEP)
 
 dates = future_dates[idx]
-mid = p50[idx]
-low = p10[idx]
-high = p90[idx]
+mid, low, high = p50[idx], p10[idx], p90[idx]
+
+today_price = df["Close"].iloc[-1]
 
 fig, ax = plt.subplots(figsize=(14, 8))
-
 ax.fill_between(dates, low, high, alpha=0.18, label="Expected Range (10–90%)")
 ax.plot(dates, mid, color="red", lw=3, marker="o", label="Projected Path")
 
-# ⭐ Today = projection anchor
 ax.scatter(
-    dates[0] - pd.Timedelta(days=20),
-    mid[0],
-    s=220,
+    df.index[-1],
+    today_price,
+    s=240,
     marker="*",
     color="orange",
     edgecolor="black",
     label="Today",
-    zorder=5
+    zorder=6
 )
 
-# Labels (relative offset)
 offset = (high.max() - low.min()) * 0.03
 for d, p in zip(dates, mid):
     ax.text(d, p + offset, f"{p:.2f}", ha="center", fontsize=11)
