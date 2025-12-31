@@ -1,18 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 3481.TW 群創光電
-6-Month Forecast ONLY
-- 方法與 8110 完全一致
-- 完全使用 Firebase 資料
-- 只輸出六個月預測圖
-- 左下角顯示時間戳記（UTC+8）
+6-Month Forecast (RECURSIVE VERSION)
+- Firebase only
+- Recursive 1-step LSTM
+- 更合理的 6M 路徑
 """
 
 # ===============================
 # Imports
 # ===============================
-import os
-import json
+import os, json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -54,10 +52,12 @@ RESULT_DIR = "results"
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 LOOKBACK = 40
-STEPS = 120          # 約 6 個月交易日
+FORECAST_DAYS = 120     # 約 6 個月交易日
 EPOCHS = 60
 BATCH = 32
 LR = 5e-4
+
+FEATURES = ["Close", "RSI", "MACD", "Volume"]
 
 # ===============================
 # Utils
@@ -80,10 +80,8 @@ def ensure_latest_trading_row(df):
     last = df.index.max()
     if last >= today:
         return df
-    all_days = pd.bdate_range(last, today)
-    for d in all_days[1:]:
-        if d not in df.index:
-            df.loc[d] = df.loc[last]
+    for d in pd.bdate_range(last, today)[1:]:
+        df.loc[d] = df.loc[last]
     return df.sort_index()
 
 def compute_indicators(df):
@@ -100,16 +98,16 @@ def compute_indicators(df):
     df["RET"] = df["Close"].pct_change()
     return df.dropna()
 
-def make_dataset(df, features):
+def make_dataset(df):
     scaler = MinMaxScaler()
-    X_all = scaler.fit_transform(df[features])
+    X_all = scaler.fit_transform(df[FEATURES])
 
     X, y = [], []
-    close_idx = features.index("Close")
+    close_idx = FEATURES.index("Close")
 
-    for i in range(len(X_all) - LOOKBACK - STEPS):
+    for i in range(len(X_all) - LOOKBACK):
         X.append(X_all[i:i+LOOKBACK])
-        y.append(X_all[i+LOOKBACK:i+LOOKBACK+STEPS, close_idx])
+        y.append(X_all[i+LOOKBACK, close_idx])
 
     return np.array(X), np.array(y), scaler
 
@@ -118,7 +116,7 @@ def build_model(input_shape):
         LSTM(64, return_sequences=True, input_shape=input_shape),
         Dropout(0.2),
         LSTM(32),
-        Dense(STEPS)
+        Dense(1)
     ])
     model.compile(optimizer=Adam(LR), loss="mse")
     return model
@@ -144,8 +142,7 @@ df = load_df_from_firestore(TICKER)
 df = ensure_latest_trading_row(df)
 df = compute_indicators(df)
 
-FEATURES = ["Close", "RSI", "MACD", "Volume"]
-X, y, scaler = make_dataset(df, FEATURES)
+X, y, scaler = make_dataset(df)
 
 split = int(len(X) * 0.8)
 X_train, X_val = X[:split], X[split:]
@@ -163,15 +160,26 @@ model.fit(
 )
 
 # ===============================
-# 6M Forecast
+# Recursive Forecast
 # ===============================
-last_X = X[-1:]
-pred_scaled = model.predict(last_X)[0]
+print("Running recursive forecast...")
+window = df[FEATURES].iloc[-LOOKBACK:].copy()
+future_close = []
 
-close_scaler = MinMaxScaler()
-close_scaler.fit(df[["Close"]])
+for _ in range(FORECAST_DAYS):
+    scaled_window = scaler.transform(window)
+    pred_scaled = model.predict(scaled_window[np.newaxis, ...], verbose=0)[0, 0]
 
-future_close = close_scaler.inverse_transform(pred_scaled.reshape(-1, 1)).flatten()
+    close_min = scaler.data_min_[FEATURES.index("Close")]
+    close_max = scaler.data_max_[FEATURES.index("Close")]
+    pred_close = pred_scaled * (close_max - close_min) + close_min
+
+    future_close.append(pred_close)
+
+    next_row = window.iloc[-1].copy()
+    next_row["Close"] = pred_close
+    window = pd.concat([window.iloc[1:], next_row.to_frame().T])
+    window = compute_indicators(window)
 
 future_dates = pd.bdate_range(
     start=df.index[-1] + BDay(1),
@@ -184,9 +192,9 @@ future_dates = pd.bdate_range(
 fig, ax = plt.subplots(figsize=(14, 8))
 
 ax.plot(df.index[-120:], df["Close"].iloc[-120:], label="Historical", color="black")
-ax.plot(future_dates, future_close, label="6-Month Forecast", color="tab:blue")
+ax.plot(future_dates, future_close, label="6-Month Forecast (Recursive)", color="tab:red")
 
-ax.set_title("3481.TW | 6-Month Forecast", fontsize=14)
+ax.set_title("3481.TW | 6-Month Forecast (Recursive)", fontsize=14)
 ax.legend()
 ax.grid(alpha=0.3)
 
@@ -194,7 +202,7 @@ add_timestamp(ax)
 
 out_path = os.path.join(
     RESULT_DIR,
-    f"{datetime.now():%Y-%m-%d}_3481_6m_forecast.png"
+    f"{datetime.now():%Y-%m-%d}_3481_6m_forecast_recursive.png"
 )
 
 plt.tight_layout()
