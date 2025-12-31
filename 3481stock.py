@@ -147,9 +147,7 @@ def build_model():
 
     ctx = attention(x)
 
-    outs = []
-    for q in QUANTILES:
-        outs.append(Dense(FORECAST_DAYS, name=f"q{int(q*100)}")(ctx))
+    outs = [Dense(FORECAST_DAYS)(ctx) for _ in QUANTILES]
 
     model = Model(inp, outs)
     model.compile(
@@ -159,24 +157,16 @@ def build_model():
     return model
 
 # ===============================
-# Main
+# Train
 # ===============================
-print("Loading data...")
-df = load_df(TICKER)
-df = ensure_latest_row(df)
-df = indicators(df)
-
+df = indicators(ensure_latest_row(load_df(TICKER)))
 X, y, scaler = make_dataset(df)
 
 split = int(len(X) * 0.8)
-X_tr, X_va = X[:split], X[split:]
-y_tr, y_va = y[:split], y[split:]
-
 model = build_model()
 model.fit(
-    X_tr,
-    [y_tr]*3,
-    validation_data=(X_va, [y_va]*3),
+    X[:split], [y[:split]]*3,
+    validation_data=(X[split:], [y[split:]]*3),
     epochs=EPOCHS,
     batch_size=BATCH,
     callbacks=[EarlyStopping(patience=12, restore_best_weights=True)],
@@ -192,9 +182,11 @@ preds = model.predict(last_window[np.newaxis, ...], verbose=0)
 close_idx = FEATURES.index("Close")
 cmin, cmax = scaler.data_min_[close_idx], scaler.data_max_[close_idx]
 
-p10, p50, p90 = [
-    p[0] * (cmax - cmin) + cmin for p in preds
-]
+p10, p50, p90 = [(p[0] * (cmax - cmin) + cmin) for p in preds]
+
+# 🚑 修正 quantile crossing
+p10 = np.minimum(p10, p50)
+p90 = np.maximum(p90, p50)
 
 future_dates = pd.bdate_range(
     start=df.index[-1] + BDay(1),
@@ -202,7 +194,7 @@ future_dates = pd.bdate_range(
 )
 
 # ===============================
-# Plot (Same Style as Sample)
+# Plot (Corrected)
 # ===============================
 STEP = 20
 idx = np.arange(0, FORECAST_DAYS, STEP)
@@ -217,9 +209,10 @@ fig, ax = plt.subplots(figsize=(14, 8))
 ax.fill_between(dates, low, high, alpha=0.18, label="Expected Range (10–90%)")
 ax.plot(dates, mid, color="red", lw=3, marker="o", label="Projected Path")
 
+# ⭐ Today = projection anchor
 ax.scatter(
-    df.index[-1],
-    df["Close"].iloc[-1],
+    dates[0] - pd.Timedelta(days=20),
+    mid[0],
     s=220,
     marker="*",
     color="orange",
@@ -228,14 +221,12 @@ ax.scatter(
     zorder=5
 )
 
+# Labels (relative offset)
+offset = (high.max() - low.min()) * 0.03
 for d, p in zip(dates, mid):
-    ax.text(d, p + 1.2, f"{p:.2f}", ha="center", fontsize=11)
+    ax.text(d, p + offset, f"{p:.2f}", ha="center", fontsize=11)
 
-ax.set_title(
-    "3481.TW · 6M Outlook (Quantile Attention LSTM)",
-    fontsize=15
-)
-
+ax.set_title("3481.TW · 6M Outlook (Quantile Attention LSTM)", fontsize=15)
 ax.grid(alpha=0.3)
 ax.legend()
 
@@ -250,7 +241,7 @@ ax.text(
 
 out = os.path.join(
     RESULT_DIR,
-    f"{datetime.now():%Y-%m-%d}_3481_quantile_outlook.png"
+    f"{datetime.now():%Y-%m-%d}_3481_quantile_outlook_fixed.png"
 )
 plt.tight_layout()
 plt.savefig(out, dpi=150)
