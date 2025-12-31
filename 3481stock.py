@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 3481.TW 群創光電
-6-Month Forecast (RECURSIVE - SAFE CLOSE-ONLY VERSION)
+6-Month Forecast (MULTI-STEP ATTENTION LSTM)
 """
 
 # ===============================
@@ -17,10 +17,14 @@ from zoneinfo import ZoneInfo
 from pandas.tseries.offsets import BDay
 
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import (
+    Input, LSTM, Dense, Dropout,
+    Permute, Multiply, Lambda
+)
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.optimizers import Adam
+import tensorflow.keras.backend as K
 
 # ===============================
 # Firebase Setup
@@ -49,22 +53,22 @@ RESULT_DIR = "results"
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 LOOKBACK = 40
-FORECAST_DAYS = 120
-EPOCHS = 60
+FORECAST_DAYS = 120   # 6 months
+EPOCHS = 80
 BATCH = 32
 LR = 5e-4
 
-FEATURES = ["Close"]  # ✅ recursive 唯一正解
+FEATURES = ["Close", "RSI", "MACD", "Volume"]
 
 # ===============================
 # Utils
 # ===============================
-def load_df_from_firestore(ticker, collection=COLLECTION, days=500):
+def load_df_from_firestore(ticker, collection=COLLECTION, days=600):
     rows = []
     for doc in db.collection(collection).stream():
         p = doc.to_dict().get(ticker)
-        if p and "Close" in p:
-            rows.append({"date": doc.id, "Close": p["Close"]})
+        if p:
+            rows.append({"date": doc.id, **p})
 
     if not rows:
         raise ValueError(f"⚠️ Firestore 無 {ticker} 資料")
@@ -85,25 +89,67 @@ def ensure_latest_trading_row(df):
 
     return df.sort_index()
 
+def compute_indicators(df):
+    df = df.copy()
+
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
+    rs = gain / (loss + 1e-9)
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    ema12 = df["Close"].ewm(span=12).mean()
+    ema26 = df["Close"].ewm(span=26).mean()
+    df["MACD"] = ema12 - ema26
+
+    return df.dropna()
+
 def make_dataset(df):
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df[FEATURES])
+    X_all = scaler.fit_transform(df[FEATURES])
+
+    close_idx = FEATURES.index("Close")
 
     X, y = [], []
-    for i in range(len(scaled) - LOOKBACK):
-        X.append(scaled[i:i+LOOKBACK])
-        y.append(scaled[i+LOOKBACK, 0])
+    for i in range(len(X_all) - LOOKBACK - FORECAST_DAYS):
+        X.append(X_all[i:i+LOOKBACK])
+        y.append(
+            X_all[
+                i+LOOKBACK : i+LOOKBACK+FORECAST_DAYS,
+                close_idx
+            ]
+        )
 
     return np.array(X), np.array(y), scaler
 
-def build_model(input_shape):
-    model = Sequential([
-        LSTM(64, return_sequences=True, input_shape=input_shape),
-        Dropout(0.2),
-        LSTM(32),
-        Dense(1)
-    ])
-    model.compile(optimizer=Adam(LR), loss="mse")
+# ===============================
+# Attention Block
+# ===============================
+def attention_block(x):
+    # x: (batch, time, features)
+    score = Dense(1, activation="tanh")(x)
+    score = Lambda(lambda z: K.squeeze(z, axis=-1))(score)
+    weights = Lambda(lambda z: K.softmax(z))(score)
+    weights = Lambda(lambda z: K.expand_dims(z, axis=-1))(weights)
+    context = Multiply()([x, weights])
+    context = Lambda(lambda z: K.sum(z, axis=1))(context)
+    return context
+
+def build_model():
+    inp = Input(shape=(LOOKBACK, len(FEATURES)))
+
+    x = LSTM(64, return_sequences=True)(inp)
+    x = Dropout(0.2)(x)
+    x = LSTM(32, return_sequences=True)(x)
+
+    context = attention_block(x)
+    out = Dense(FORECAST_DAYS)(context)
+
+    model = Model(inp, out)
+    model.compile(
+        optimizer=Adam(LR),
+        loss="mse"
+    )
     return model
 
 def add_timestamp(ax):
@@ -125,6 +171,7 @@ def add_timestamp(ax):
 print("Loading Firebase data...")
 df = load_df_from_firestore(TICKER)
 df = ensure_latest_trading_row(df)
+df = compute_indicators(df)
 
 X, y, scaler = make_dataset(df)
 
@@ -132,59 +179,79 @@ split = int(len(X) * 0.8)
 X_train, X_val = X[:split], X[split:]
 y_train, y_val = y[:split], y[split:]
 
-print("Training model...")
-model = build_model((LOOKBACK, 1))
+print("Training Attention-LSTM (Multi-step)...")
+model = build_model()
 model.fit(
     X_train, y_train,
     validation_data=(X_val, y_val),
     epochs=EPOCHS,
     batch_size=BATCH,
-    callbacks=[EarlyStopping(patience=10, restore_best_weights=True)],
+    callbacks=[
+        EarlyStopping(
+            patience=12,
+            restore_best_weights=True
+        )
+    ],
     verbose=1
 )
 
 # ===============================
-# Recursive Forecast (SAFE)
+# Forecast
 # ===============================
-print("Running recursive forecast...")
+print("Running 6-month forecast...")
 
-window = df[FEATURES].iloc[-LOOKBACK:].values
-future_close = []
+last_window = df[FEATURES].iloc[-LOOKBACK:]
+scaled_last = scaler.transform(last_window)
 
-close_min = scaler.data_min_[0]
-close_max = scaler.data_max_[0]
+pred_scaled = model.predict(
+    scaled_last[np.newaxis, ...],
+    verbose=0
+)[0]
 
-for _ in range(FORECAST_DAYS):
-    scaled = scaler.transform(window)
-    pred_scaled = model.predict(scaled[np.newaxis, ...], verbose=0)[0, 0]
-    pred_close = pred_scaled * (close_max - close_min) + close_min
+close_idx = FEATURES.index("Close")
+close_min = scaler.data_min_[close_idx]
+close_max = scaler.data_max_[close_idx]
 
-    future_close.append(pred_close)
-    window = np.vstack([window[1:], [[pred_close]]])
+future_close = (
+    pred_scaled * (close_max - close_min) + close_min
+)
 
 future_dates = pd.bdate_range(
     start=df.index[-1] + BDay(1),
-    periods=len(future_close)
+    periods=FORECAST_DAYS
 )
 
 # ===============================
 # Plot
 # ===============================
 fig, ax = plt.subplots(figsize=(14, 8))
-ax.plot(df.index[-120:], df["Close"].iloc[-120:], label="Historical", color="black")
-ax.plot(future_dates, future_close, label="6M Forecast (Recursive)", color="tab:red")
-ax.set_title("3481.TW | 6-Month Forecast (Recursive - Close Only)", fontsize=14)
+ax.plot(
+    df.index[-120:],
+    df["Close"].iloc[-120:],
+    label="Historical",
+    color="black"
+)
+ax.plot(
+    future_dates,
+    future_close,
+    label="6M Forecast (Multi-step)",
+    color="tab:red"
+)
+
+ax.set_title(
+    "3481.TW | 6-Month Forecast (Attention-LSTM, Multi-step)",
+    fontsize=14
+)
 ax.legend()
 ax.grid(alpha=0.3)
 add_timestamp(ax)
 
 out_path = os.path.join(
     RESULT_DIR,
-    f"{datetime.now():%Y-%m-%d}_3481_6m_forecast_recursive.png"
+    f"{datetime.now():%Y-%m-%d}_3481_6m_forecast_multistep.png"
 )
 plt.tight_layout()
 plt.savefig(out_path, dpi=150)
 plt.close()
 
 print(f"Saved → {out_path}")
-
