@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 3481.TW 群創光電
-6-Month Forecast (RECURSIVE VERSION - FIXED)
+6-Month Forecast (RECURSIVE VERSION - FINAL SAFE)
 """
 
 # ===============================
@@ -158,9 +158,10 @@ model.fit(
 )
 
 # ===============================
-# Recursive Forecast
+# Recursive Forecast (FINAL)
 # ===============================
 print("Running recursive forecast...")
+
 window = df[FEATURES].iloc[-LOOKBACK:].copy()
 future_close = []
 
@@ -177,8 +178,8 @@ for _ in range(FORECAST_DAYS):
 
     next_row = window.iloc[-1].copy()
     next_row["Close"] = pred_close
+    # RSI / MACD / Volume freeze
     window = pd.concat([window.iloc[1:], next_row.to_frame().T])
-    window = compute_indicators(window)[FEATURES]
 
 future_dates = pd.bdate_range(
     start=df.index[-1] + BDay(1),
