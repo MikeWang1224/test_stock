@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 3481.TW 群創光電
-6-Month Forecast (RECURSIVE VERSION - FINAL SAFE)
+6-Month Forecast (RECURSIVE - SAFE CLOSE-ONLY VERSION)
 """
 
 # ===============================
@@ -54,7 +54,7 @@ EPOCHS = 60
 BATCH = 32
 LR = 5e-4
 
-FEATURES = ["Close", "RSI", "MACD", "Volume"]
+FEATURES = ["Close"]  # ✅ recursive 唯一正解
 
 # ===============================
 # Utils
@@ -63,10 +63,12 @@ def load_df_from_firestore(ticker, collection=COLLECTION, days=500):
     rows = []
     for doc in db.collection(collection).stream():
         p = doc.to_dict().get(ticker)
-        if p:
-            rows.append({"date": doc.id, **p})
+        if p and "Close" in p:
+            rows.append({"date": doc.id, "Close": p["Close"]})
+
     if not rows:
         raise ValueError(f"⚠️ Firestore 無 {ticker} 資料")
+
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").tail(days).set_index("date")
@@ -77,35 +79,20 @@ def ensure_latest_trading_row(df):
     last = df.index.max()
     if last >= today:
         return df
+
     for d in pd.bdate_range(last, today)[1:]:
         df.loc[d] = df.loc[last]
+
     return df.sort_index()
-
-def compute_indicators(df):
-    df = df.copy()
-
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = -delta.clip(upper=0).rolling(14).mean()
-    rs = gain / (loss + 1e-9)
-    df["RSI"] = 100 - (100 / (1 + rs))
-
-    ema12 = df["Close"].ewm(span=12).mean()
-    ema26 = df["Close"].ewm(span=26).mean()
-    df["MACD"] = ema12 - ema26
-
-    return df.dropna()
 
 def make_dataset(df):
     scaler = MinMaxScaler()
-    X_all = scaler.fit_transform(df[FEATURES])
+    scaled = scaler.fit_transform(df[FEATURES])
 
     X, y = [], []
-    close_idx = FEATURES.index("Close")
-
-    for i in range(len(X_all) - LOOKBACK):
-        X.append(X_all[i:i+LOOKBACK])
-        y.append(X_all[i+LOOKBACK, close_idx])
+    for i in range(len(scaled) - LOOKBACK):
+        X.append(scaled[i:i+LOOKBACK])
+        y.append(scaled[i+LOOKBACK, 0])
 
     return np.array(X), np.array(y), scaler
 
@@ -138,7 +125,6 @@ def add_timestamp(ax):
 print("Loading Firebase data...")
 df = load_df_from_firestore(TICKER)
 df = ensure_latest_trading_row(df)
-df = compute_indicators(df)
 
 X, y, scaler = make_dataset(df)
 
@@ -147,7 +133,7 @@ X_train, X_val = X[:split], X[split:]
 y_train, y_val = y[:split], y[split:]
 
 print("Training model...")
-model = build_model((LOOKBACK, X.shape[2]))
+model = build_model((LOOKBACK, 1))
 model.fit(
     X_train, y_train,
     validation_data=(X_val, y_val),
@@ -158,16 +144,15 @@ model.fit(
 )
 
 # ===============================
-# Recursive Forecast (FINAL)
+# Recursive Forecast (SAFE)
 # ===============================
 print("Running recursive forecast...")
 
-window = df[FEATURES].iloc[-LOOKBACK:].copy()
+window = df[FEATURES].iloc[-LOOKBACK:].values
 future_close = []
 
-close_idx = FEATURES.index("Close")
-close_min = scaler.data_min_[close_idx]
-close_max = scaler.data_max_[close_idx]
+close_min = scaler.data_min_[0]
+close_max = scaler.data_max_[0]
 
 for _ in range(FORECAST_DAYS):
     scaled = scaler.transform(window)
@@ -175,11 +160,7 @@ for _ in range(FORECAST_DAYS):
     pred_close = pred_scaled * (close_max - close_min) + close_min
 
     future_close.append(pred_close)
-
-    next_row = window.iloc[-1].copy()
-    next_row["Close"] = pred_close
-    # RSI / MACD / Volume freeze
-    window = pd.concat([window.iloc[1:], next_row.to_frame().T])
+    window = np.vstack([window[1:], [[pred_close]]])
 
 future_dates = pd.bdate_range(
     start=df.index[-1] + BDay(1),
@@ -192,7 +173,7 @@ future_dates = pd.bdate_range(
 fig, ax = plt.subplots(figsize=(14, 8))
 ax.plot(df.index[-120:], df["Close"].iloc[-120:], label="Historical", color="black")
 ax.plot(future_dates, future_close, label="6M Forecast (Recursive)", color="tab:red")
-ax.set_title("3481.TW | 6-Month Forecast (Recursive)", fontsize=14)
+ax.set_title("3481.TW | 6-Month Forecast (Recursive - Close Only)", fontsize=14)
 ax.legend()
 ax.grid(alpha=0.3)
 add_timestamp(ax)
@@ -206,3 +187,4 @@ plt.savefig(out_path, dpi=150)
 plt.close()
 
 print(f"Saved → {out_path}")
+
