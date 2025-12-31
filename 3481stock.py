@@ -2,7 +2,7 @@
 """
 3481.TW 群創光電
 6-Month Forecast ONLY
-- 方法與原本一致（LSTM 多步）
+- 方法與 8110 完全一致（CSV → LSTM）
 - 只輸出六個月預測圖
 - 左下角顯示時間戳記（UTC+8）
 """
@@ -13,7 +13,6 @@
 import os
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import matplotlib.pyplot as plt
 
 from datetime import datetime
@@ -30,6 +29,7 @@ from tensorflow.keras.optimizers import Adam
 # Config
 # ===============================
 TICKER = "3481.TW"
+DATA_PATH = "data/3481.TW.csv"   # ← 跟 8110 一樣
 RESULT_DIR = "results"
 os.makedirs(RESULT_DIR, exist_ok=True)
 
@@ -68,8 +68,7 @@ def make_dataset(df, features):
 
     for i in range(len(X_all) - LOOKBACK - STEPS):
         X.append(X_all[i:i+LOOKBACK])
-        future_close = X_all[i+LOOKBACK:i+LOOKBACK+STEPS, close_idx]
-        y.append(future_close)
+        y.append(X_all[i+LOOKBACK:i+LOOKBACK+STEPS, close_idx])
 
     return np.array(X), np.array(y), scaler
 
@@ -104,8 +103,13 @@ def add_timestamp(ax):
 # ===============================
 # Main
 # ===============================
-print("Downloading data...")
-df = yf.download(TICKER, period="5y", auto_adjust=False)
+print("Loading CSV data (same as 8110)...")
+
+df = pd.read_csv(
+    DATA_PATH,
+    parse_dates=["Date"],
+    index_col="Date"
+)
 
 df = compute_indicators(df)
 
@@ -133,16 +137,16 @@ model.fit(
 last_X = X[-1:]
 pred_scaled = model.predict(last_X)[0]
 
-# inverse scale Close only
+# inverse scale Close only（跟 8110 一樣的做法）
 close_scaler = MinMaxScaler()
 close_scaler.fit(df[["Close"]])
+
 future_close = close_scaler.inverse_transform(
     pred_scaled.reshape(-1, 1)
 ).flatten()
 
-start_date = df.index[-1]
 future_dates = pd.bdate_range(
-    start=start_date + BDay(1),
+    start=df.index[-1] + BDay(1),
     periods=len(future_close)
 )
 
@@ -169,7 +173,7 @@ ax.set_title("3481.TW | 6-Month Forecast", fontsize=14)
 ax.legend()
 ax.grid(alpha=0.3)
 
-# ✅ 左下角時間戳
+# 左下角時間戳
 add_timestamp(ax)
 
 out_path = os.path.join(
