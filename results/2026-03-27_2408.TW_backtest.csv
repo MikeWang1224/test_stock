@@ -1,0 +1,2 @@
+﻿forecast_file,forecast_asof_date,t,t1,close_t,pred_t1,actual_t1,direction_pred,direction_actual,aligned
+2026-03-26_2408.TW_forecast.csv,2026-03-26,2026-03-26,2026-03-27,225.5,226.43470340967176,219.5,1,-1,True
