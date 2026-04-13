@@ -1,0 +1,2 @@
+﻿forecast_file,forecast_asof_date,t,t1,close_t,pred_t1,actual_t1,direction_pred,direction_actual,aligned
+2026-04-12_2408.TW_forecast.csv,2026-04-12,2026-04-10,2026-04-13,215.0,213.7077483534813,225.5,-1,1,True
